@@ -1,0 +1,23 @@
+{
+  "name": "talk-pi-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "e2e": "bun e2e/harness.ts"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "~1.6.1",
+    "@earendil-works/pi-ai": "~1.6.1",
+    "@earendil-works/pi-durable": "~1.6.1",
+    "@earendil-works/pi-schema": "~1.6.1",
+    "agents": "0.34.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261125.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.168.0"
+  }
+}

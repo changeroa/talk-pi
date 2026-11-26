@@ -1,0 +1,182 @@
+#!/usr/bin/env bun
+// Plays the bridge side of the socket against the deployed agent; no KakaoTalk account involved.
+// Memory writes and kibitzer nudges are observed through the Worker's structured logs (wrangler tail).
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const URL_ = process.env.AGENT_WS_URL;
+if (!URL_) throw new Error("AGENT_WS_URL is not set (wss://<worker host>/agents/talk-pi/main)");
+const WORKER = process.env.WORKER_NAME ?? "talk-pi";
+const OWNER_ID = process.env.E2E_OWNER_ID ?? "e2e-owner";
+const CONFIG = process.env.TALK_PI_CONFIG ?? join(homedir(), ".config/talk-pi");
+const token = process.env.BRIDGE_TOKEN ?? readFileSync(join(CONFIG, "bridge.env"), "utf8").match(/^BRIDGE_TOKEN=(.+)$/m)![1];
+
+type Frame = { type: string; [k: string]: unknown };
+type LogEvent = { event: string; chatId?: string; path?: string; accepted?: boolean; [k: string]: unknown };
+const log = (dir: string, f: unknown) => console.log(`${new Date().toISOString()} ${dir} ${JSON.stringify(f)}`);
+
+function waiterQueue<T>() {
+  const items: T[] = [];
+  const waiters: { pred: (x: T) => boolean; done: (x: T) => void }[] = [];
+  return {
+    items,
+    push(x: T) {
+      items.push(x);
+      const i = waiters.findIndex((w) => w.pred(x));
+      if (i >= 0) waiters.splice(i, 1)[0].done(x);
+    },
+    next(pred: (x: T) => boolean, ms: number, what: string): Promise<T> {
+      return new Promise((done, fail) => {
+        const hit = items.find(pred);
+        if (hit) return done(hit);
+        const t = setTimeout(() => fail(new Error(`timeout after ${ms}ms waiting for ${what}`)), ms);
+        waiters.push({ pred, done: (x) => (clearTimeout(t), done(x)) });
+      });
+    },
+  };
+}
+
+const workerLogs = waiterQueue<LogEvent>();
+const tail = Bun.spawn(["bunx", "wrangler", "tail", WORKER, "--format", "pretty"], { stdout: "pipe", stderr: "pipe" });
+const tailReady = (async () => {
+  let ready: () => void = () => {};
+  const isReady = new Promise<void>((r) => (ready = r));
+  void (async () => {
+    const decoder = new TextDecoder();
+    let buf = "";
+    for await (const chunk of tail.stdout) {
+      buf += decoder.decode(chunk, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (/Connected to|tail.*started|Waiting for logs/i.test(line)) ready();
+        const m = line.match(/\{"event".*\}\s*$/);
+        if (m) {
+          const ev = JSON.parse(m[0]) as LogEvent;
+          log("log", ev);
+          workerLogs.push(ev);
+        }
+      }
+    }
+  })();
+  void (async () => {
+    const decoder = new TextDecoder();
+    for await (const chunk of tail.stderr) if (/Connected to|Waiting for logs/i.test(decoder.decode(chunk))) ready();
+  })();
+  return isReady;
+})();
+
+function open(auth: string | undefined): Promise<{ ws: WebSocket; next: (pred: (f: Frame) => boolean, ms: number) => Promise<Frame> }> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(URL_!, auth ? { headers: { Authorization: `Bearer ${auth}` } } : undefined);
+    const frames = waiterQueue<Frame>();
+    ws.onmessage = (e) => {
+      const f = JSON.parse(String(e.data)) as Frame;
+      log("<-", f);
+      frames.push(f);
+    };
+    const next = (pred: (f: Frame) => boolean, ms: number) => frames.next(pred, ms, "frame");
+    ws.onopen = () => resolve({ ws, next });
+    ws.onerror = () => reject(new Error("socket error"));
+    ws.onclose = (e) => reject(new Error(`closed ${e.code}`));
+  });
+}
+
+const send = (ws: WebSocket, f: Frame) => (log("->", f), ws.send(JSON.stringify(f)));
+const run = Date.now().toString(36);
+const msg = (n: string, chatId: string, senderId: string, senderName: string, text: string): Frame => ({
+  type: "message", messageId: `e2e-${run}-${n}`, chatId, chatKind: "dm", senderId, senderName, text, ts: Math.floor(Date.now() / 1000),
+});
+const chatA = `e2e-chat-a-${run}`;
+const chatB = `e2e-chat-b-${run}`;
+const result: Record<string, unknown> = { run };
+
+// One connection per turn: a Durable Object flushes its logs to wrangler tail only when the socket's request ends.
+async function turn(m: Frame): Promise<{ text: string; ack: unknown }> {
+  const c = await open(token);
+  send(c.ws, m);
+  const ack = (await c.next((f) => f.type === "ack" && f.messageId === m.messageId, 10_000)).status;
+  const r = await c.next((f) => f.type === "reply" && f.replyTo === m.messageId, 180_000);
+  send(c.ws, { type: "delivered", messageId: m.messageId as string });
+  c.ws.close();
+  return { text: String(r.text), ack };
+}
+
+const pick = <T>(xs: readonly T[]) => xs[Math.floor(Math.random() * xs.length)];
+const allergy = pick([
+  { item: "갑각류", dish: "새우 감바스랑 게살 볶음밥" },
+  { item: "땅콩", dish: "땅콩소스 팟타이" },
+  { item: "메밀", dish: "냉모밀 소바" },
+  { item: "복숭아", dish: "복숭아 타르트" },
+]);
+const color = pick(["초록색", "보라색", "주황색", "하늘색"]);
+result.allergen = allergy.item;
+result.color = color;
+
+await Promise.race([tailReady, new Promise((_, fail) => setTimeout(() => fail(new Error("wrangler tail did not connect")), 60_000))]);
+
+let unauthorized = false;
+await open("wrong-token").catch(() => (unauthorized = true));
+result.unauthorized_rejected = unauthorized;
+
+// (a) chat A: the owner states two durable facts; the primary writes a note for each.
+const allergyMsg = msg("1", chatA, OWNER_ID, "Owner", `나 ${allergy.item} 알레르기 있어. 먹으면 바로 두드러기 올라와. 꼭 기억해 둬.`);
+result.first_ack = (await turn(allergyMsg)).ack;
+const allergyWrite = await workerLogs.next((e) => e.event === "memory_write" && e.chatId === chatA, 60_000, "allergy memory_write");
+const colorMsg = msg("2", chatA, OWNER_ID, "Owner", `그리고 나 제일 좋아하는 색은 ${color}이야. 이것도 기억해 줘.`);
+await turn(colorMsg);
+const colorWrite = await workerLogs.next((e) => e.event === "memory_write" && e.chatId === chatA && e.path !== allergyWrite.path, 60_000, "color memory_write");
+result.allergy_note = allergyWrite.path;
+result.color_note = colorWrite.path;
+result.allergy_note_source = allergyWrite.source;
+
+let c = await open(token);
+const hello1 = await c.next((f) => f.type === "hello", 10_000);
+send(c.ws, allergyMsg);
+result.duplicate_ack = (await c.next((f) => f.type === "ack" && f.messageId === allergyMsg.messageId, 10_000)).status;
+const stranger = msg("x", `e2e-chat-x-${run}`, "e2e-stranger", "Stranger", "안녕하세요");
+send(c.ws, stranger);
+result.stranger_ack = (await c.next((f) => f.type === "ack" && f.messageId === stranger.messageId, 10_000)).status;
+
+const closed = new Promise<void>((r) => c.ws.addEventListener("close", () => r()));
+send(c.ws, { type: "restart" });
+await closed;
+c = await open(token);
+const hello2 = await c.next((f) => f.type === "hello", 10_000);
+result.restarted = hello1.bootId !== hello2.bootId;
+c.ws.close();
+
+// (b) chat B after restart: a prompt that never mentions allergies, where the allergy note matters.
+const dinner = msg("3", chatB, OWNER_ID, "Owner", `오늘 저녁에 ${allergy.dish} 해 먹으려는데, 레시피 좀 짧게 알려줘.`);
+const dinnerReply = (await turn(dinner)).text;
+await workerLogs.next((e) => e.event === "turn" && e.chatId === chatB, 60_000, "chat B turn log");
+const nudgesB = () => workerLogs.items.filter((e) => e.event === "recall_delivered" && e.chatId === chatB).map((e) => String(e.path));
+result.recall_reply = dinnerReply;
+result.delivered_after_dinner = nudgesB();
+
+// (d) a follow-up in the same chat: nothing delivered again.
+const followUp = msg("4", chatB, OWNER_ID, "Owner", "고마워. 그럼 곁들일 샐러드도 하나 추천해 줘.");
+result.follow_up_reply = (await turn(followUp)).text;
+await workerLogs.next((e) => e.event === "turn" && e.chatId === chatB && e.messageId === followUp.messageId, 60_000, "follow-up turn log");
+tail.kill();
+
+const delivered = nudgesB();
+result.delivered_paths = delivered;
+result.kibitzer_turns = workerLogs.items.filter((e) => e.event === "kibitzer_turn" && e.chatId === chatB);
+const checks = {
+  a_note_written: typeof allergyWrite.path === "string" && typeof colorWrite.path === "string",
+  b_allergy_nudged: delivered.includes(String(allergyWrite.path)),
+  b_reply_uses_note: dinnerReply.includes("알레르기") || dinnerReply.includes(allergy.item),
+  c_irrelevant_not_nudged: !delivered.includes(String(colorWrite.path)),
+  d_no_repeat: new Set(delivered).size === delivered.length,
+  restarted: result.restarted === true,
+  unauthorized_rejected: unauthorized,
+  duplicate_ack: result.duplicate_ack === "duplicate",
+  stranger_ignored: result.stranger_ack === "ignored",
+};
+result.checks = checks;
+result.e2e_kibitzer_recall = Object.values(checks).every(Boolean);
+console.log(JSON.stringify(result, null, 2));
+process.exit(result.e2e_kibitzer_recall ? 0 : 1);

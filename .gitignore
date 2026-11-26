@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+*.log
+.env
+.deploy.vars
+.dev.vars
+.secrets.tmp.json

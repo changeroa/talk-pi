@@ -1,0 +1,8 @@
+# Copy to .deploy.vars (gitignored) and fill in. scripts/deploy.sh exports CLOUDFLARE_ACCOUNT_ID
+# and uploads every other line as a Worker secret. LITELLM_KEY and BRIDGE_TOKEN are set separately
+# with `wrangler secret put` from stdin so they never sit in this file.
+CLOUDFLARE_ACCOUNT_ID=<cloudflare account id>
+LITELLM_BASE_URL=https://<litellm host>/v1
+OWNER_KAKAO_IDS=e2e-owner,<owner kakao user id>
+AGENT_NAME=<agent display name>
+OWNER_HONORIFIC=<how the agent addresses the owner>
