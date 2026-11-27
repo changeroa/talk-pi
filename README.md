@@ -26,7 +26,7 @@ Worker(`agent/.deploy.vars`, 예시는 `agent/.deploy.vars.example`; `scripts/de
 - `AGENT_NAME`: 에이전트가 스스로를 부르는 이름.
 - `OWNER_HONORIFIC`: 에이전트가 주인을 부르는 호칭.
 
-`LITELLM_KEY`(서비스 전용 LiteLLM 가상 키)와 `BRIDGE_TOKEN`(브리지 인증 토큰)은 파일에 두지 않고 `npx wrangler secret put <이름>`에 stdin으로 넣는다. `MODEL_ID`와 `KIBITZER_MODEL_ID`는 `wrangler.jsonc`의 vars에 있다.
+`LITELLM_KEY`(서비스 전용 LiteLLM 가상 키), `BRIDGE_TOKEN`(브리지 인증 토큰), `MAILBOX_TOKEN`(리드 우편함 전용 토큰, 아래 참고)은 파일에 두지 않고 `npx wrangler secret put <이름>`에 stdin으로 넣는다. `MODEL_ID`와 `KIBITZER_MODEL_ID`는 `wrangler.jsonc`의 vars에 있다.
 
 브리지(`~/.config/talk-pi/bridge.env`, 예시는 `bridge/bridge.env.example`): `BRIDGE_TOKEN`, `AGENT_WS_URL`(`wss://<worker host>/agents/talk-pi/main`), `BRIDGE_LABEL`(launchd 라벨, 기본 `talk-pi-bridge`). 설정 폴더는 `TALK_PI_CONFIG`로 바꿀 수 있다.
 
@@ -41,5 +41,9 @@ cd bridge && ./deploy/install.sh             # launchd 에이전트 설치
 ```
 
 e2e 하네스는 카카오 계정 없이 브리지 역할을 대신하고, `wrangler tail`로 Worker의 구조화 로그를 함께 읽는다. 대화방 A에서 주인이 알레르기와 좋아하는 색을 말하면 메모가 써지는지, DO를 재시작한 뒤 대화방 B에서 알레르기를 언급하지 않는 요리 질문을 했을 때 키비처가 알레르기 메모를 짚고 답이 그것을 쓰는지, 상관없는 색 메모는 짚지 않는지, 다음 턴에 같은 메모가 다시 나가지 않는지 확인한다. 잘못된 토큰 거부, 중복 messageId, 모르는 사람의 메시지도 받아서 오류 없이 처리되는지도 함께 본다.
+
+## 리드 우편함
+
+비서실장 에이전트(리드)는 카카오톡을 거치지 않고 HTTP 우편함으로 talk-pi에 지시를 보낸다. `POST /mailbox/inbox`에 `{"text": "<지시>"}`를 보내면 DO가 지시를 SQLite(`kk_mail_in`)에 저장하고 곧바로 `ack #<id> <요약>` 줄을 outbox(`kk_mail_out`)에 쓴 뒤, 예약 작업으로 깨어나 지시를 도착 순서대로 하나씩 전용 pi 세션(`lead-mailbox`)에서 처리하고 턴이 끝나면 `done #<id> <결과>` 줄을 정확히 한 번 쓴다. 리드는 `GET /mailbox/outbox?since=<cursor>`로 그 뒤의 줄을 읽는다. 두 경로 모두 `BRIDGE_TOKEN`과 별개인 `MAILBOX_TOKEN` Bearer 인증을 요구하고, 지시를 어떻게 처리할지는 프롬프트가 정한다. 리드 쪽 명령은 `bun scripts/mailbox.ts send|read|watch`이고 설정은 `~/.config/talk-pi/mailbox.env`(`TALK_PI_URL`, `MAILBOX_TOKEN`)에 둔다.
 
 계정 연결 절차는 [docs/LOGIN.md](docs/LOGIN.md)에 있다.

@@ -1,4 +1,5 @@
-import { Agent, routeAgentRequest, type Connection, type WSMessage } from "agents";
+import { Agent, getAgentByName, routeAgentRequest, type Connection, type WSMessage } from "agents";
+import { enqueue, finish, migrateMailbox, nextPending, parseInstruction, readOutbox, type OutLine, type Sql } from "./mailbox";
 import { PiHarness } from "agents/harness/pi";
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import type { Model } from "@earendil-works/pi-ai";
@@ -25,6 +26,8 @@ export interface Env {
   TalkPi: DurableObjectNamespace<TalkPi>;
   LITELLM_KEY: string;
   BRIDGE_TOKEN: string;
+  /** Bearer token for the lead mailbox endpoints only; separate from BRIDGE_TOKEN. */
+  MAILBOX_TOKEN?: string;
   /** Comma-separated KakaoTalk user ids of the owner; given to the model as context, never used as a gate. */
   OWNER_KAKAO_IDS: string;
   LITELLM_BASE_URL: string;
@@ -37,6 +40,9 @@ export interface Env {
 }
 
 const PROVIDER_ID = "litellm";
+const AGENT_INSTANCE = "main";
+const MAILBOX_CHAT = "lead-mailbox";
+const MAILBOX_SENDER = "lead";
 
 function liteLlmModel(env: Env, id: string): Model<"openai-completions"> {
   return {
@@ -113,6 +119,11 @@ export class TalkPi extends Agent<Env> {
     this.sql`CREATE TABLE IF NOT EXISTS kk_kibitzer (chat_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, cursor INTEGER NOT NULL, chars INTEGER NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS kk_judged (chat_id TEXT NOT NULL, path TEXT NOT NULL, status TEXT NOT NULL, hint TEXT, at INTEGER NOT NULL, PRIMARY KEY (chat_id, path))`;
     this.migrateLegacyMemories();
+    migrateMailbox(this.mailSql);
+  }
+
+  private get mailSql(): Sql {
+    return this.sql.bind(this) as Sql;
   }
 
   private migrateLegacyMemories(): void {
@@ -155,6 +166,13 @@ export class TalkPi extends Agent<Env> {
   }
 
   private speaker(turn: Turn): string {
+    if (turn.chatId === MAILBOX_CHAT) {
+      return [
+        `지금 말하는 사람: ${this.env.OWNER_HONORIFIC}의 비서실장 에이전트(리드). 카카오톡 사용자가 아니라 우편함으로 온 지시이며, ${this.env.OWNER_HONORIFIC}과 같은 권한으로 다룬다.`,
+        "이 대화의 답은 카카오톡으로 나가지 않고 우편함 outbox에 done 줄로 기록된다. 결과를 한두 문장으로 답한다.",
+        `메모 폴더: chats/${MAILBOX_CHAT}/, 공용: topics/`,
+      ].join("\n");
+    }
     const [person] = this.sql<Row>`SELECT name FROM kk_people WHERE sender_id = ${turn.senderId}`;
     const owner = this.isOwner(turn.senderId) ? `주인(${this.env.OWNER_HONORIFIC}) 맞음` : "주인 아님";
     const [chat] = this.sql<Row>`SELECT kind, title FROM kk_chats WHERE chat_id = ${turn.chatId}`;
@@ -459,6 +477,51 @@ export class TalkPi extends Agent<Env> {
     }
   }
 
+  async mailboxPost(text: string): Promise<{ id: number }> {
+    const id = enqueue(this.mailSql, text);
+    log("mailbox_in", { id });
+    await this.schedule(0, "drainMailbox");
+    return { id };
+  }
+
+  async mailboxRead(since: number): Promise<OutLine[]> {
+    if (!this.draining && nextPending(this.mailSql)) await this.schedule(0, "drainMailbox");
+    return readOutbox(this.mailSql, since);
+  }
+
+  private draining = false;
+
+  /** Runs pending lead instructions one at a time in arrival order; each ends with exactly one done line. */
+  async drainMailbox(): Promise<void> {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      for (let m = nextPending(this.mailSql); m; m = nextPending(this.mailSql)) {
+        let result: string;
+        try {
+          let [row] = this.sql<Row>`SELECT session_id FROM kk_chats WHERE chat_id = ${MAILBOX_CHAT}`;
+          if (!row) {
+            const session = await this.harness.sessions.create({ agent: { extensions: [this.primary] } });
+            this.sql`INSERT INTO kk_chats (chat_id, session_id, kind, title) VALUES (${MAILBOX_CHAT}, ${session.id}, 'mailbox', NULL)`;
+            row = { session_id: session.id };
+          }
+          const sessionId = String(row.session_id);
+          this.sql`INSERT OR REPLACE INTO kk_turn (session_id, chat_id, sender_id) VALUES (${sessionId}, ${MAILBOX_CHAT}, ${MAILBOX_SENDER})`;
+          this.appendEvent(MAILBOX_CHAT, "prompt", m.text);
+          const out = await this.harness.session(sessionId).prompt(m.text, { operationId: `mailbox:${m.id}` });
+          result = out.status === "done" ? (out.text?.trim() ?? "") : `error: turn ${out.status}${out.reason ? ` (${out.reason})` : ""}`;
+          if (out.status === "done" && result) this.appendEvent(MAILBOX_CHAT, "assistant", result);
+        } catch (err) {
+          result = `error: ${String(err)}`;
+        }
+        finish(this.mailSql, m.id, result);
+        log("mailbox_done", { id: m.id, error: result.startsWith("error:") });
+      }
+    } finally {
+      this.draining = false;
+    }
+  }
+
   private readonly chatQueues = new Map<string, { msg: InboundMessage; userText: string }[]>();
 
   private async runTurn(connection: Connection, sessionId: string, msg: InboundMessage, userText: string): Promise<void> {
@@ -491,8 +554,27 @@ function timingSafeEqual(a: string, b: string): boolean {
   return x.byteLength === y.byteLength && crypto.subtle.timingSafeEqual(x, y);
 }
 
+async function mailbox(request: Request, env: Env, path: string): Promise<Response> {
+  if (!env.MAILBOX_TOKEN || !timingSafeEqual(request.headers.get("Authorization") ?? "", `Bearer ${env.MAILBOX_TOKEN}`)) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  const agent = await getAgentByName(env.TalkPi, AGENT_INSTANCE);
+  if (path === "/mailbox/inbox" && request.method === "POST") {
+    const text = parseInstruction(await request.json().catch(() => undefined));
+    if (!text) return Response.json({ error: "body must be {\"text\": \"<instruction>\"}" }, { status: 400 });
+    return Response.json(await agent.mailboxPost(text), { status: 202 });
+  }
+  if (path === "/mailbox/outbox" && request.method === "GET") {
+    const since = Number(new URL(request.url).searchParams.get("since") ?? 0);
+    return Response.json({ lines: await agent.mailboxRead(Number.isFinite(since) ? since : 0) });
+  }
+  return new Response("not found", { status: 404 });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const path = new URL(request.url).pathname;
+    if (path.startsWith("/mailbox/")) return mailbox(request, env, path);
     const response = await routeAgentRequest(request, env, {
       onBeforeConnect: (req) => {
         const auth = req.headers.get("Authorization") ?? "";
