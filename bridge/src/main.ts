@@ -18,6 +18,21 @@ const client = await new KakaoTalkClient().login();
 const listener = new KakaoTalkListener(client);
 const chats = new Map<string, ChatInfo>();
 const linkIds = new Map<string, string | undefined>();
+const memberNames = new Map<string, string>();
+
+/**
+ * The client only knows names from the login snapshot, which misses most members of a large open chat.
+ * Look up an unknown author once (a MEMBER request for that one id) and remember the answer, even an empty one.
+ */
+const authorName = async (chatId: string, authorId: number): Promise<string> => {
+  const key = `${chatId}:${authorId}`;
+  const known = memberNames.get(key);
+  if (known !== undefined) return known;
+  const [member] = await client.getMembersByIds(chatId, [String(authorId)]);
+  const name = member?.nickname ?? "";
+  memberNames.set(key, name);
+  return name;
+};
 
 /** Replies queued before a restart arrive before any inbound message, so the chat kind is looked up, never assumed. */
 const chatInfo = async (chatId: string): Promise<ChatInfo> => {
@@ -65,7 +80,11 @@ listener.on("connected", () => log("kakao_connected", {}));
 listener.on("disconnected", () => log("kakao_disconnected", {}));
 listener.on("error", (err) => log("kakao_error", { name: err.name }));
 listener.on("message", (ev) => {
-  bridge.onKakaoMessage(ev).catch((err: Error) => log("forward_failed", { messageId: ev.log_id, error: err.name }));
+  (async () => {
+    const own = String(ev.author_id) === String(client.getCredentials().userId);
+    const name = ev.author_name || (own ? "" : await authorName(ev.chat_id, ev.author_id).catch(() => ""));
+    await bridge.onKakaoMessage({ ...ev, author_name: name || null });
+  })().catch((err: Error) => log("forward_failed", { messageId: ev.log_id, error: err.name }));
 });
 
 const shutdown = () => {
