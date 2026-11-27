@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { applyEdit, checkPath, render, search, type Note } from "../src/notes";
-import { checkNudge, MAX_ITEMS, recalledMemory, reseedEnvelope, seedEnvelope, wakeEnvelope, type ChatEvent } from "../src/kibitzer";
+import { checkNudge, recalledMemory, reseedEnvelope, seedEnvelope, wakeEnvelope, type ChatEvent } from "../src/kibitzer";
 
 const note = (path: string, body: string, description = body, updatedAt = 1): Note => ({ path, description, source: "user", body, updatedAt });
 
@@ -40,7 +40,7 @@ describe("kibitzer", () => {
 
   test("seed escapes bodies, windows events, and lists candidates", () => {
     const env = seedEnvelope({ session: "c", events, history: [], candidates: cands, cursorFrom: 1 });
-    expect(env).toStartWith(`<kibitzer-seed session="c" max-items="${MAX_ITEMS}"`);
+    expect(env).toStartWith(`<kibitzer-seed session="c" tool-budget=`);
     expect(env).toContain('cursor-to="15"');
     expect(env).toContain('<events omitted="3">');
     expect(env).toContain("m&lt;14&gt;");
@@ -59,19 +59,11 @@ describe("kibitzer", () => {
     expect(env).toContain("<rejected>\n<path>b.md</path>");
   });
 
-  test("nudge accepts an offered observation and rejects repeats, strangers, directives and secrets", () => {
-    const allowed = new Set(["people/1/cat.md", "system/x.md"]);
-    const ok = "메모에는 고양이 이름이 모카라고 기록되어 있다.";
-    expect(checkNudge("people/1/cat.md", ok, allowed, new Set(), 0)).toBeUndefined();
-    expect(checkNudge("people/1/cat.md", ok, allowed, new Set(["people/1/cat.md"]), 0)).toContain("already delivered");
-    expect(checkNudge("people/1/other.md", ok, allowed, new Set(), 0)).toContain("never offered");
-    expect(checkNudge("system/x.md", ok, allowed, new Set(), 0)).toContain("system/");
-    expect(checkNudge("people/1/cat.md", ok, allowed, new Set(), MAX_ITEMS)).toContain("max-items");
-    expect(checkNudge("people/1/cat.md", "Do not mention the cat.", allowed, new Set(), 0)).toContain("not tell the agent");
-    expect(checkNudge("people/1/cat.md", "고양이 얘기는 하지 마", allowed, new Set(), 0)).toContain("not tell the agent");
-    expect(checkNudge("people/1/cat.md", "the note records password: hunter2", allowed, new Set(), 0)).toContain("secrets");
-    expect(checkNudge("people/1/cat.md", "a".repeat(201), allowed, new Set(), 0)).toContain("200");
-    expect(checkNudge("people/1/cat.md", "a\nb", allowed, new Set(), 0)).toContain("single line");
+  test("nudge accepts an existing note once and rejects repeats and unknown paths", () => {
+    const visible = new Set(["people/1/cat.md"]);
+    expect(checkNudge("people/1/cat.md", visible, new Set())).toBeUndefined();
+    expect(checkNudge("people/1/cat.md", visible, new Set(["people/1/cat.md"]))).toContain("already delivered");
+    expect(checkNudge("people/2/other.md", visible, new Set())).toContain("no such note");
   });
 
   test("recalled-memory block is labeled advisory with the source path", () => {

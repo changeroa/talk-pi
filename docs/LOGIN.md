@@ -51,10 +51,10 @@ tail -f ~/Library/Logs/$LABEL.log
 
 ## 5. 주인의 카카오 사용자 ID 등록
 
-에이전트는 허용 목록에 있는 사람에게만 답한다. 처음에는 주인도 목록에 없으므로, 주인이 에이전트에게 카톡을 한 번 보낸 뒤 Worker 로그에서 주인의 사용자 ID를 찾는다.
+에이전트는 누가 주인인지를 문맥으로 받고, 누구의 어떤 부탁을 들어줄지는 프롬프트에 따라 스스로 정한다. 주인이 에이전트에게 카톡을 한 번 보낸 뒤 Worker 로그에서 주인의 사용자 ID를 찾는다.
 
 ```sh
-cd $REPO/agent && npx wrangler tail talk-pi --format json | grep '"ignored"'
+cd $REPO/agent && npx wrangler tail talk-pi --format json | grep '"senderId"'
 ```
 
 나온 `senderId`를 `agent/.deploy.vars`의 `OWNER_KAKAO_IDS`에 쉼표로 덧붙이고 다시 배포한다. `e2e-owner`는 e2e 하네스용이므로 남겨 둔다(브리지 토큰이 있어야만 그 ID로 메시지를 넣을 수 있다).
@@ -63,11 +63,11 @@ cd $REPO/agent && npx wrangler tail talk-pi --format json | grep '"ignored"'
 cd $REPO/agent && ./scripts/deploy.sh
 ```
 
-그다음부터 주인이 에이전트에게 "OO도 답해 줘"라고 하면 에이전트가 `allow_person` 도구로 그 사람을 목록에 넣는다. 주인이 아닌 사람의 요청으로는 추가되지 않는다.
+그다음부터 주인이 "OO도 답해 줘"라고 하면 에이전트가 그 허락을 메모로 남기고 다음부터 참고한다.
 
 ## 6. 확인
 
-주인이 에이전트에게 1:1로 "안녕"을 보내 답장이 오는지 본다. 단체방에서는 `AGENT_NAME_PATTERN`에 맞는 이름이 들어가거나 에이전트를 멘션한 메시지에만 답한다.
+주인이 에이전트에게 1:1로 "안녕"을 보내 답장이 오는지 본다. 단체방의 메시지는 모두 에이전트에게 가고, 끼어들지 말지는 에이전트가 정한다(답하지 않기로 하면 아무것도 보내지 않는다).
 
 ## 문제가 생기면
 

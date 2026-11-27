@@ -5,7 +5,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createRegistry, Harness, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import { persona } from "./persona";
+import { NO_REPLY, persona } from "./persona";
 import { parseBridgeFrame, type AgentFrame, type InboundMessage } from "./protocol";
 import { applyEdit, checkPath, PROVENANCE, render, search, type Edit, type Note, type Provenance } from "./notes";
 import {
@@ -25,7 +25,7 @@ export interface Env {
   TalkPi: DurableObjectNamespace<TalkPi>;
   LITELLM_KEY: string;
   BRIDGE_TOKEN: string;
-  /** Comma-separated KakaoTalk user ids that are always allowed and may add others. */
+  /** Comma-separated KakaoTalk user ids of the owner; given to the model as context, never used as a gate. */
   OWNER_KAKAO_IDS: string;
   LITELLM_BASE_URL: string;
   MODEL_ID: string;
@@ -35,7 +35,6 @@ export interface Env {
 }
 
 const PROVIDER_ID = "litellm";
-const CANDIDATE_LIMIT = 8;
 
 function liteLlmModel(env: Env, id: string): Model<"openai-completions"> {
   return {
@@ -55,7 +54,7 @@ function liteLlmModel(env: Env, id: string): Model<"openai-completions"> {
 
 type Row = Record<string, string | number | null>;
 type Turn = { chatId: string; senderId: string };
-type KibitzerTurn = Turn & { allowed: Set<string>; nudged: number };
+type KibitzerTurn = Turn & { nudged: number };
 
 const text = (t: string) => ({ output: [{ type: "text" as const, text: t }] });
 const fail = (t: string) => ({ output: [{ type: "text" as const, text: t }], isError: true });
@@ -103,7 +102,7 @@ export class TalkPi extends Agent<Env> {
   private migrate(): void {
     this.sql`CREATE TABLE IF NOT EXISTS kk_chats (chat_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT, title TEXT)`;
     this.sql`CREATE TABLE IF NOT EXISTS kk_people (sender_id TEXT PRIMARY KEY, name TEXT)`;
-    this.sql`CREATE TABLE IF NOT EXISTS kk_allow (sender_id TEXT PRIMARY KEY, added_by TEXT, added_at INTEGER)`;
+    this.sql`DROP TABLE IF EXISTS kk_allow`;
     this.sql`CREATE TABLE IF NOT EXISTS kk_turn (session_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, sender_id TEXT NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS kk_seen (message_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`;
     this.sql`CREATE TABLE IF NOT EXISTS kk_outbox (message_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL)`;
@@ -155,10 +154,12 @@ export class TalkPi extends Agent<Env> {
 
   private speaker(turn: Turn): string {
     const [person] = this.sql<Row>`SELECT name FROM kk_people WHERE sender_id = ${turn.senderId}`;
-    const owner = this.isOwner(turn.senderId) ? ` (${this.env.OWNER_HONORIFIC}, 주인)` : "";
+    const owner = this.isOwner(turn.senderId) ? `주인(${this.env.OWNER_HONORIFIC}) 맞음` : "주인 아님";
+    const [chat] = this.sql<Row>`SELECT kind, title FROM kk_chats WHERE chat_id = ${turn.chatId}`;
     const paths = this.visibleNotes(turn).map((n) => `- ${n.path}`);
     return [
-      `지금 말하는 사람: ${person?.name ?? "이름 모름"} (id ${turn.senderId})${owner}`,
+      `지금 말하는 사람: ${person?.name ?? "이름 모름"} (id ${turn.senderId}), ${owner}`,
+      `대화방: ${chat?.kind ?? "unknown"}${chat?.title ? ` "${chat.title}"` : ""} (id ${turn.chatId})`,
       `이 사람 메모 폴더: people/${turn.senderId}/, 이 대화방 메모 폴더: chats/${turn.chatId}/, 공용: topics/`,
       "저장된 메모 경로(내용은 memory view로 읽기):",
       paths.length ? paths.join("\n") : "- (아직 없음)",
@@ -177,7 +178,6 @@ export class TalkPi extends Agent<Env> {
       insert_line: opt(int({ description: "insert: 1부터 시작하는 줄 번호." })),
       insert_text: opt(str({ description: "insert: 넣을 텍스트." })),
     });
-    const Allow = obj({ name: str({ description: "답장을 허락할 사람의 카카오톡 이름." }) });
 
     const memory: ToolRegistration<typeof Memory> = {
       name: "memory",
@@ -205,21 +205,6 @@ export class TalkPi extends Agent<Env> {
         return text(`saved ${args.path}`);
       },
     };
-    const allowPerson: ToolRegistration<typeof Allow> = {
-      name: "allow_person",
-      description: "주인이 부탁할 때만: 이름으로 사람을 찾아 네가 답장해도 되는 목록에 넣는다.",
-      parameters: Allow,
-      replay: "safe",
-      execute: async ({ name }, api) => {
-        const turn = this.turnFor(String(api.conversationId));
-        if (!turn || !this.isOwner(turn.senderId)) throw new Error("only the owner can add people");
-        const rows = this.sql<Row>`SELECT sender_id FROM kk_people WHERE name = ${name}`;
-        if (rows.length !== 1) return fail(rows.length ? "같은 이름이 여러 명이라 못 정함" : "그 이름은 아직 본 적 없음");
-        this.sql`INSERT OR REPLACE INTO kk_allow (sender_id, added_by, added_at) VALUES (${String(rows[0].sender_id)}, ${turn.senderId}, ${Date.now()})`;
-        return text(`${name} 허락함`);
-      },
-    };
-
     return {
       name: "talk-pi.primary",
       sections: [
@@ -232,7 +217,7 @@ export class TalkPi extends Agent<Env> {
           },
         },
       ],
-      tools: [memory, allowPerson],
+      tools: [memory],
     };
   }
 
@@ -277,7 +262,6 @@ export class TalkPi extends Agent<Env> {
           return note ? text(render(note)) : fail("note not found");
         }
         const hits = search(visible, query ?? "", 5);
-        for (const h of hits) turn.allowed.add(h.path);
         return text(hits.map((h) => `${h.path} — ${h.description}`).join("\n") || "(no matches)");
       },
     };
@@ -289,7 +273,8 @@ export class TalkPi extends Agent<Env> {
       execute: async ({ path, hint }, api) => {
         const turn = turnOf(api.conversationId);
         const delivered = new Set(this.sql<Row>`SELECT path FROM kk_judged WHERE chat_id = ${turn.chatId} AND status IN ('delivered', 'pending')`.map((r) => String(r.path)));
-        const reason = checkNudge(path, hint, turn.allowed, delivered, turn.nudged);
+        const visible = new Set(this.visibleNotes(turn).map((n) => n.path));
+        const reason = checkNudge(path, visible, delivered);
         log("nudge", { chatId: turn.chatId, path, accepted: !reason, reason });
         if (reason) return fail(`rejected: ${reason}`);
         turn.nudged++;
@@ -305,15 +290,13 @@ export class TalkPi extends Agent<Env> {
     };
   }
 
-  private candidates(turn: Turn, prompt: string): Note[] {
+  /** Every visible note the kibitzer has not judged yet (or that changed since it declined it); relevance is its call. */
+  private candidates(turn: Turn): Note[] {
     const judged = new Map(this.sql<Row>`SELECT path, status, at FROM kk_judged WHERE chat_id = ${turn.chatId}`.map((r) => [String(r.path), r]));
-    const open = this.visibleNotes(turn).filter((n) => {
+    return this.visibleNotes(turn).filter((n) => {
       const j = judged.get(n.path);
       return !j || (j.status === "rejected" && n.updatedAt > Number(j.at));
     });
-    const ranked = search(open, prompt, CANDIDATE_LIMIT);
-    const rest = open.filter((n) => !ranked.includes(n) && n.path.startsWith(`people/${turn.senderId}/`));
-    return [...ranked, ...rest].slice(0, CANDIDATE_LIMIT);
   }
 
   private async newKibitzerSession(): Promise<string> {
@@ -323,8 +306,8 @@ export class TalkPi extends Agent<Env> {
     return session.id;
   }
 
-  private async wakeKibitzer(turn: Turn, prompt: string, messageId: string): Promise<void> {
-    const candidates = this.candidates(turn, prompt);
+  private async wakeKibitzer(turn: Turn, messageId: string): Promise<void> {
+    const candidates = this.candidates(turn);
     if (!candidates.length) return;
     const [state] = this.sql<Row>`SELECT session_id, cursor, chars FROM kk_kibitzer WHERE chat_id = ${turn.chatId}`;
     let sessionId: string;
@@ -351,7 +334,7 @@ export class TalkPi extends Agent<Env> {
       chars = Number(state.chars);
     }
 
-    const kTurn: KibitzerTurn = { ...turn, allowed: new Set(candidates.map((c) => c.path)), nudged: 0 };
+    const kTurn: KibitzerTurn = { ...turn, nudged: 0 };
     this.kibitzerTurns.set(sessionId, kTurn);
     try {
       const result = await this.harness.session(sessionId).prompt(envelope, { operationId: `kibitzer:${messageId}` });
@@ -376,10 +359,6 @@ export class TalkPi extends Agent<Env> {
 
   private isOwner(senderId: string): boolean {
     return this.env.OWNER_KAKAO_IDS.split(",").map((s) => s.trim()).includes(senderId);
-  }
-
-  private isAllowed(senderId: string): boolean {
-    return this.isOwner(senderId) || this.sql<Row>`SELECT 1 FROM kk_allow WHERE sender_id = ${senderId}`.length > 0;
   }
 
   private send(connection: Connection, frame: AgentFrame): void {
@@ -423,11 +402,6 @@ export class TalkPi extends Agent<Env> {
     this.sql`INSERT INTO kk_seen (message_id, at) VALUES (${msg.messageId}, ${Date.now()})`;
     this.sql`INSERT INTO kk_people (sender_id, name) VALUES (${msg.senderId}, ${msg.senderName}) ON CONFLICT(sender_id) DO UPDATE SET name = excluded.name`;
 
-    if (!this.isAllowed(msg.senderId)) {
-      log("ignored", { chatId: msg.chatId, senderId: msg.senderId, messageId: msg.messageId });
-      this.send(connection, { type: "ack", messageId: msg.messageId, status: "ignored" });
-      return;
-    }
     this.send(connection, { type: "ack", messageId: msg.messageId, status: "accepted" });
 
     let sessionId = this.sessionFor(msg);
@@ -442,7 +416,7 @@ export class TalkPi extends Agent<Env> {
     const userText = (msg.chatKind === "dm" ? "" : `[${msg.senderName}] `) + msg.text;
     this.appendEvent(msg.chatId, "prompt", userText);
     try {
-      await this.wakeKibitzer(turn, userText, msg.messageId);
+      await this.wakeKibitzer(turn, msg.messageId);
     } catch (err) {
       log("kibitzer_error", { chatId: msg.chatId, error: String(err) });
     }
@@ -450,8 +424,9 @@ export class TalkPi extends Agent<Env> {
 
     const prompt = [...recalled, userText].join("\n\n");
     const result = await this.harness.session(sessionId).prompt(prompt, { operationId: `kakao:${msg.messageId}` });
-    const reply = result.status === "done" ? result.text?.trim() : undefined;
-    log("turn", { chatId: msg.chatId, messageId: msg.messageId, status: result.status, reason: result.reason, recalled: recalled.length });
+    const out = result.status === "done" ? result.text?.trim() : undefined;
+    const reply = out === NO_REPLY ? undefined : out;
+    log("turn", { chatId: msg.chatId, messageId: msg.messageId, status: result.status, reason: result.reason, recalled: recalled.length, silent: out === NO_REPLY });
     if (!reply) return;
     this.appendEvent(msg.chatId, "assistant", reply);
 

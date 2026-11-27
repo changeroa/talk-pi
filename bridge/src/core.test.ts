@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { backoffMs, Bridge, isAddressed, type ChatInfo, type KakaoEvent, type SocketLike } from "./core";
+import { backoffMs, Bridge, shouldForward, type ChatInfo, type KakaoEvent, type SocketLike } from "./core";
 
 class FakeSocket implements SocketLike {
   sent: Record<string, unknown>[] = [];
@@ -21,7 +21,6 @@ class FakeSocket implements SocketLike {
 }
 
 const SELF = "1000";
-const NAME = /아리/;
 const ev = (over: Partial<KakaoEvent> = {}): KakaoEvent => ({
   chat_id: "c1", log_id: "L1", author_id: 42, author_name: "Owner", message: "안녕", sent_at: 1, ...over,
 });
@@ -33,7 +32,6 @@ function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSen
   const logs: string[] = [];
   const bridge = new Bridge({
     selfUserId: SELF,
-    namePattern: NAME,
     connect: () => {
       const s = new FakeSocket();
       sockets.push(s);
@@ -54,18 +52,14 @@ function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSen
   return { bridge, sockets, kakao, timers, logs };
 }
 
-describe("isAddressed", () => {
-  test("every DM from someone else is addressed", () => {
-    expect(isAddressed(ev(), "dm", SELF, NAME)).toBe(true);
+describe("shouldForward", () => {
+  test("forwards any non-empty message from someone else", () => {
+    expect(shouldForward(ev(), SELF)).toBe(true);
+    expect(shouldForward(ev({ message: "점심 뭐 먹지" }), SELF)).toBe(true);
   });
-  test("own messages and empty text are never addressed", () => {
-    expect(isAddressed(ev({ author_id: 1000 }), "dm", SELF, NAME)).toBe(false);
-    expect(isAddressed(ev({ message: "  " }), "dm", SELF, NAME)).toBe(false);
-  });
-  test("group messages need a mention or the name", () => {
-    expect(isAddressed(ev({ message: "점심 뭐 먹지" }), "group", SELF, NAME)).toBe(false);
-    expect(isAddressed(ev({ message: "아리야 점심 추천" }), "group", SELF, NAME)).toBe(true);
-    expect(isAddressed(ev({ message: "@봇 hi", mentions: [{ user_id: SELF }] }), "open", SELF, NAME)).toBe(true);
+  test("skips own messages and empty text", () => {
+    expect(shouldForward(ev({ author_id: 1000 }), SELF)).toBe(false);
+    expect(shouldForward(ev({ message: "  " }), SELF)).toBe(false);
   });
 });
 
@@ -86,14 +80,14 @@ describe("Bridge", () => {
     expect(sockets[0].sent[0]).toMatchObject({ type: "message", chatId: "c1", chatKind: "dm", senderId: "42", senderName: "Owner", text: "안녕", ts: 1 });
   });
 
-  test("forwards each Kakao log id once and skips unaddressed group chatter", async () => {
+  test("forwards each Kakao log id once, including unaddressed group chatter", async () => {
     const { bridge, sockets } = setup({ c1: { kind: "dm" }, g: { kind: "group", title: "팀" } });
     sockets[0].onopen!();
     await bridge.onKakaoMessage(ev({ log_id: "A" }));
     await bridge.onKakaoMessage(ev({ log_id: "A" }));
     await bridge.onKakaoMessage(ev({ log_id: "G1", chat_id: "g", message: "회의 몇 시?" }));
     await bridge.onKakaoMessage(ev({ log_id: "G2", chat_id: "g", message: "아리야 회의 몇 시?" }));
-    expect(sockets[0].sent.map((f) => f.messageId)).toEqual(["A", "G2"]);
+    expect(sockets[0].sent.map((f) => f.messageId)).toEqual(["A", "G1", "G2"]);
     expect(sockets[0].sent[1]).toMatchObject({ chatKind: "group", chatTitle: "팀" });
   });
 

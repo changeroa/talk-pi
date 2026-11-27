@@ -43,16 +43,13 @@ export interface BridgeDeps {
   sendKakao(chatId: string, text: string): Promise<void>;
   chatInfo(chatId: string): Promise<ChatInfo>;
   selfUserId: string;
-  namePattern: RegExp;
   log(event: string, fields: Record<string, string | number | boolean>): void;
   setTimer(fn: () => void, ms: number): unknown;
 }
 
-export function isAddressed(ev: KakaoEvent, kind: ChatKind, selfUserId: string, namePattern: RegExp): boolean {
-  if (String(ev.author_id) === selfUserId) return false;
-  if (!ev.message.trim()) return false;
-  if (kind === "dm") return true;
-  return (ev.mentions ?? []).some((m) => m.user_id === selfUserId) || namePattern.test(ev.message);
+/** Mechanical only: skip our own messages (loop guard) and empty text. Whether to answer is the agent's call. */
+export function shouldForward(ev: KakaoEvent, selfUserId: string): boolean {
+  return String(ev.author_id) !== selfUserId && ev.message.trim() !== "";
 }
 
 export function backoffMs(attempt: number): number {
@@ -93,8 +90,8 @@ export class Bridge {
 
   async onKakaoMessage(ev: KakaoEvent): Promise<void> {
     if (!this.inbound.firstTime(ev.log_id)) return;
+    if (!shouldForward(ev, this.deps.selfUserId)) return;
     const info = await this.deps.chatInfo(ev.chat_id);
-    if (!isAddressed(ev, info.kind, this.deps.selfUserId, this.deps.namePattern)) return;
     const frame: Inbound = {
       type: "message",
       messageId: ev.log_id,

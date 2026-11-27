@@ -4,7 +4,7 @@
 
 `bridge/`는 macOS에서 launchd 에이전트로 도는 Bun 서비스다. [agent-messenger](https://github.com/agent-messenger/agent-messenger)의 `KakaoTalkClient`와 `KakaoTalkListener`로 태블릿 자리에 로그인해 LOCO로 메시지를 받는다. 1:1 대화와, 단체방에서 에이전트 이름을 부르거나 멘션한 메시지만 골라 Worker로 보낸다. 연결은 브리지가 먼저 거는 인증된 WebSocket 하나이고, 답장도 같은 소켓으로 받아 카카오톡으로 보낸다. 끊기면 1초에서 60초까지 늘려 가며 다시 붙고, messageId로 중복을 거르며, 메시지 본문과 자격 정보는 로그에 남기지 않는다.
 
-`agent/`는 Cloudflare Worker `talk-pi`다. Agents SDK의 Durable Object `TalkPi` 하나가 `agents/harness/pi`(pi-durable)를 품고, 대화방마다 pi 세션을 하나씩 연다. 모델은 LiteLLM을 OpenAI 호환 공급자로 붙였다. 답장은 허용 목록에 있는 사람(주인과, 주인이 `allow_person`으로 추가한 사람)에게만 하고, 보낸 답장은 브리지가 전달을 확인할 때까지 outbox에 남아 있다가 재연결 때 다시 보낸다.
+`agent/`는 Cloudflare Worker `talk-pi`다. Agents SDK의 Durable Object `TalkPi` 하나가 `agents/harness/pi`(pi-durable)를 품고, 대화방마다 pi 세션을 하나씩 연다. 모델은 LiteLLM을 OpenAI 호환 공급자로 붙였다. 코드는 동작만 보장하고 판단은 모델이 한다. 브리지는 자기 메시지를 뺀 모든 메시지(단체방 포함)를 넘기고, 에이전트는 보낸 사람이 누구인지(주인 여부 포함)를 문맥으로 받아 답할지, 무엇을 들어줄지 프롬프트대로 정한다. 답하지 않기로 하면 `<no-reply>`만 내고 아무것도 보내지 않는다. 보낸 답장은 브리지가 전달을 확인할 때까지 outbox에 남아 있다가 재연결 때 다시 보낸다.
 
 ## 기억: 메모 저장소와 키비처
 
@@ -28,7 +28,7 @@ Worker(`agent/.deploy.vars`, 예시는 `agent/.deploy.vars.example`; `scripts/de
 
 `LITELLM_KEY`(서비스 전용 LiteLLM 가상 키)와 `BRIDGE_TOKEN`(브리지 인증 토큰)은 파일에 두지 않고 `npx wrangler secret put <이름>`에 stdin으로 넣는다. `MODEL_ID`와 `KIBITZER_MODEL_ID`는 `wrangler.jsonc`의 vars에 있다.
 
-브리지(`~/.config/talk-pi/bridge.env`, 예시는 `bridge/bridge.env.example`): `BRIDGE_TOKEN`, `AGENT_WS_URL`(`wss://<worker host>/agents/talk-pi/main`), `AGENT_NAME_PATTERN`(단체방에서 에이전트를 부른 것으로 볼 정규식), `BRIDGE_LABEL`(launchd 라벨, 기본 `talk-pi-bridge`). 설정 폴더는 `TALK_PI_CONFIG`로 바꿀 수 있다.
+브리지(`~/.config/talk-pi/bridge.env`, 예시는 `bridge/bridge.env.example`): `BRIDGE_TOKEN`, `AGENT_WS_URL`(`wss://<worker host>/agents/talk-pi/main`), `BRIDGE_LABEL`(launchd 라벨, 기본 `talk-pi-bridge`). 설정 폴더는 `TALK_PI_CONFIG`로 바꿀 수 있다.
 
 ## 명령
 
@@ -40,6 +40,6 @@ cd bridge && bun test && npx tsc --noEmit    # 브리지 단위 테스트, 타�
 cd bridge && ./deploy/install.sh             # launchd 에이전트 설치
 ```
 
-e2e 하네스는 카카오 계정 없이 브리지 역할을 대신하고, `wrangler tail`로 Worker의 구조화 로그를 함께 읽는다. 대화방 A에서 주인이 알레르기와 좋아하는 색을 말하면 메모가 써지는지, DO를 재시작한 뒤 대화방 B에서 알레르기를 언급하지 않는 요리 질문을 했을 때 키비처가 알레르기 메모를 짚고 답이 그것을 쓰는지, 상관없는 색 메모는 짚지 않는지, 다음 턴에 같은 메모가 다시 나가지 않는지 확인한다. 잘못된 토큰 거부, 중복 messageId, 허용 목록 밖 사람 무시도 함께 본다.
+e2e 하네스는 카카오 계정 없이 브리지 역할을 대신하고, `wrangler tail`로 Worker의 구조화 로그를 함께 읽는다. 대화방 A에서 주인이 알레르기와 좋아하는 색을 말하면 메모가 써지는지, DO를 재시작한 뒤 대화방 B에서 알레르기를 언급하지 않는 요리 질문을 했을 때 키비처가 알레르기 메모를 짚고 답이 그것을 쓰는지, 상관없는 색 메모는 짚지 않는지, 다음 턴에 같은 메모가 다시 나가지 않는지 확인한다. 잘못된 토큰 거부, 중복 messageId, 모르는 사람의 메시지도 받아서 오류 없이 처리되는지도 함께 본다.
 
 계정 연결 절차는 [docs/LOGIN.md](docs/LOGIN.md)에 있다.

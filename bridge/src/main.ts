@@ -9,7 +9,6 @@ const required = (name: string) => {
 };
 const AGENT_WS_URL = required("AGENT_WS_URL");
 const BRIDGE_TOKEN = required("BRIDGE_TOKEN");
-const NAME_PATTERN = new RegExp(required("AGENT_NAME_PATTERN"));
 
 const log = (event: string, fields: Record<string, string | number | boolean>) =>
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
@@ -20,7 +19,6 @@ const chats = new Map<string, ChatInfo>();
 
 const bridge = new Bridge({
   selfUserId: String(client.getCredentials().userId),
-  namePattern: NAME_PATTERN,
   connect: () => new WebSocket(AGENT_WS_URL, { headers: { Authorization: `Bearer ${BRIDGE_TOKEN}` } }) as unknown as SocketLike,
   sendKakao: async (chatId, text) => {
     await client.sendMessage(chatId, text);

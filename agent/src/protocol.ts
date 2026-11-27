@@ -19,7 +19,7 @@ export type BridgeFrame =
 
 export type AgentFrame =
   | { type: "hello"; bootId: string }
-  | { type: "ack"; messageId: string; status: "accepted" | "ignored" | "duplicate" }
+  | { type: "ack"; messageId: string; status: "accepted" | "duplicate" }
   | { type: "reply"; replyTo: string; chatId: string; text: string };
 
 const KINDS: readonly ChatKind[] = ["dm", "group", "open", "unknown"];

@@ -122,10 +122,6 @@ let c = await open(token);
 const hello1 = await c.next((f) => f.type === "hello", 10_000);
 send(c.ws, allergyMsg);
 result.duplicate_ack = (await c.next((f) => f.type === "ack" && f.messageId === allergyMsg.messageId, 10_000)).status;
-const stranger = msg("x", `e2e-chat-x-${run}`, "e2e-stranger", "Stranger", "안녕하세요");
-send(c.ws, stranger);
-result.stranger_ack = (await c.next((f) => f.type === "ack" && f.messageId === stranger.messageId, 10_000)).status;
-
 const closed = new Promise<void>((r) => c.ws.addEventListener("close", () => r()));
 send(c.ws, { type: "restart" });
 await closed;
@@ -133,6 +129,18 @@ c = await open(token);
 const hello2 = await c.next((f) => f.type === "hello", 10_000);
 result.restarted = hello1.bootId !== hello2.bootId;
 c.ws.close();
+
+// Strangers are no longer filtered by code: the turn must be accepted and finish without error (reply or silence is the model's call).
+const strangerChat = `e2e-chat-x-${run}`;
+const stranger = msg("x", strangerChat, "e2e-stranger", "Stranger", "안녕하세요");
+c = await open(token);
+send(c.ws, stranger);
+result.stranger_ack = (await c.next((f) => f.type === "ack" && f.messageId === stranger.messageId, 10_000)).status;
+const strangerReply = await c.next((f) => f.type === "reply" && f.replyTo === stranger.messageId, 120_000).catch(() => undefined);
+if (strangerReply) send(c.ws, { type: "delivered", messageId: stranger.messageId as string });
+c.ws.close();
+const strangerTurn = await workerLogs.next((e) => e.event === "turn" && e.chatId === strangerChat, 120_000, "stranger turn log");
+result.stranger_turn = strangerTurn;
 
 // (b) chat B after restart: the agent still answers.
 const dinner = msg("3", chatB, OWNER_ID, "Owner", "오늘 저녁에 새우 감바스 해 먹으려는데, 레시피 좀 짧게 알려줘.");
@@ -158,7 +166,7 @@ const checks = {
   restarted: result.restarted === true,
   unauthorized_rejected: unauthorized,
   duplicate_ack: result.duplicate_ack === "duplicate",
-  stranger_ignored: result.stranger_ack === "ignored",
+  stranger_handled: result.stranger_ack === "accepted" && strangerTurn.status === "done",
 };
 result.checks = checks;
 result.e2e_passed = Object.values(checks).every(Boolean);

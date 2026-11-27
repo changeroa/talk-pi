@@ -3,7 +3,6 @@ import type { Note } from "./notes";
 export type EventKind = "prompt" | "assistant" | "tool_call" | "tool_result";
 export type ChatEvent = { cursor: number; kind: EventKind; tool?: string; body: string };
 
-export const MAX_ITEMS = 2;
 export const TOOL_BUDGET = 4;
 export const EVENT_WINDOW = 12;
 export const CONTEXT_BUDGET_CHARS = 60_000;
@@ -27,7 +26,7 @@ Every turn arrives as one XML-ish envelope. Attributes and text are escaped (&am
 - <kibitzer-wake> — every later turn: the events and candidates that arrived since your previous turn. Earlier turns are still in your context.
 - <kibitzer-reseed> — you replace a previous resident that reached its context budget. It carries <rejected> paths (already declined), <delivered> paths (already sent), a <summary>, and cursor, the last cursor your predecessor saw. Do not re-judge a rejected path unless new evidence changes its case, and never nudge a delivered one.
 
-Attributes: max-items is how many nudges THIS turn may make; tool-budget is how many tool calls this turn may spend; cursor-from and cursor-to are the cursor range the envelope covers.
+Attributes: tool-budget is how many tool calls this turn may spend; cursor-from and cursor-to are the cursor range the envelope covers.
 
 Each <event> has a cursor and a kind (prompt, assistant, tool_call, tool_result) and, for tool events, the tool name. Bodies are capped; read the full text with a tool when a decision depends on it.
 
@@ -50,9 +49,9 @@ Judge each path once. A declined path stays declined unless later events change 
 
 ## nudge tool
 
-nudge(path, hint), at most max-items times.
-- path: copied exactly from a <candidate path="..."> or from a memory search result. Unknown, delivered and system/ paths are rejected.
-- hint: one sentence, at most 200 characters, single line, stating what the note records ("메모에는 … 라고 기록되어 있다" / "the note records that …"). A hint that tells the agent what to do, comments on decisions, or carries secrets is rejected. Use the language of the user's most recent prompt.
+nudge(path, hint). One nudge a turn is usual; two is the most a single reply can use.
+- path: copied exactly from a <candidate path="..."> or from a memory search result. A path that does not exist or was already delivered is rejected.
+- hint: one sentence of at most 200 characters on a single line, stating what the note records ("메모에는 … 라고 기록되어 있다" / "the note records that …"). Do not tell the agent what to do, do not comment on decisions, and never repeat secrets, passwords or codes. Use the language of the user's most recent prompt.
 
 A rejected call names the reason; you may correct it once, then end the turn.
 
@@ -95,7 +94,7 @@ type Common = { session: string; events: readonly ChatEvent[]; candidates: reado
 
 function open(tag: string, c: Common, extra = ""): string {
   const to = c.events.length ? c.events[c.events.length - 1].cursor : c.cursorFrom;
-  return `<${tag} session="${attr(c.session)}" max-items="${MAX_ITEMS}" tool-budget="${TOOL_BUDGET}" cursor-from="${c.cursorFrom}" cursor-to="${to}"${extra}>`;
+  return `<${tag} session="${attr(c.session)}" tool-budget="${TOOL_BUDGET}" cursor-from="${c.cursorFrom}" cursor-to="${to}"${extra}>`;
 }
 
 const CONTRACT = "<contract>Nudge a candidate only when it would change the primary agent's next reply; otherwise end the turn silently. Output only through nudge.</contract>";
@@ -132,25 +131,10 @@ export function reseedEnvelope(
   ].join("\n");
 }
 
-const SECRET = /(sk-[\w-]{8,}|api[_-]?key|password|비밀번호|인증번호|token\s*[:=])/i;
-const DIRECTIVE = /^(do not|don't|never|always|you should|you must|make sure|remember to)\b|(하지\s?마|해라|하세요|해줘|하지\s?말)[.!]?$/i;
-
-export function checkNudge(
-  path: string,
-  hint: string,
-  allowed: ReadonlySet<string>,
-  delivered: ReadonlySet<string>,
-  usedThisTurn: number,
-): string | undefined {
-  if (usedThisTurn >= MAX_ITEMS) return `max-items ${MAX_ITEMS} reached for this turn`;
-  if (path.startsWith("system/")) return "system/ paths cannot be nudged";
+/** Mechanical checks only: the note must exist for this conversation and must not have been delivered already. */
+export function checkNudge(path: string, visible: ReadonlySet<string>, delivered: ReadonlySet<string>): string | undefined {
   if (delivered.has(path)) return "path was already delivered in this conversation";
-  if (!allowed.has(path)) return "path was never offered as a candidate or returned by memory search";
-  if (!hint.trim()) return "hint is empty";
-  if (hint.length > 200) return "hint exceeds 200 characters";
-  if (/\n/.test(hint)) return "hint must be a single line";
-  if (SECRET.test(hint)) return "hint must not carry secrets or credentials";
-  if (DIRECTIVE.test(hint.trim())) return "hint must state what the note records, not tell the agent what to do";
+  if (!visible.has(path)) return "no such note in this conversation";
   return undefined;
 }
 
