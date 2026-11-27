@@ -107,6 +107,9 @@ export class Bridge {
   private readonly sentParts = new Map<string, number>();
   private readonly sending = new Set<string>();
   private readonly incomingChars = new Map<string, number>();
+  private readonly chatKinds = new Map<string, ChatKind>();
+  /** Chats whose typing signal failed once; they get no more typing until restart, so a rejected packet never repeats. */
+  private readonly typingOff = new Set<string>();
 
   constructor(private readonly deps: BridgeDeps) {}
 
@@ -134,6 +137,7 @@ export class Bridge {
       text: ev.message,
       ts: ev.sent_at,
     };
+    this.chatKinds.set(ev.chat_id, info.kind);
     this.incomingChars.set(ev.log_id, [...ev.message].length);
     if (this.incomingChars.size > 5_000) this.incomingChars.delete(this.incomingChars.keys().next().value as string);
     this.deps.log("forward", { chatId: ev.chat_id, messageId: ev.log_id, kind: info.kind });
@@ -162,10 +166,18 @@ export class Bridge {
     };
   }
 
-  /** Waits out the delay while showing "typing"; a failed typing signal only costs the indicator, never the reply. */
+  /**
+   * Waits out the delay while showing "typing". Open chats are skipped: their typing packet needs the room's
+   * link id, which the client does not expose. A failed signal turns typing off for that chat and never blocks the reply.
+   */
   private async typeFor(chatId: string, ms: number): Promise<void> {
     for (let left = ms; left > 0; left -= TYPING_REFRESH_MS) {
-      await this.deps.sendTyping(chatId).catch((error: Error) => this.deps.log("typing_failed", { chatId, error: error.name }));
+      if (this.chatKinds.get(chatId) !== "open" && !this.typingOff.has(chatId)) {
+        await this.deps.sendTyping(chatId).catch((error: Error) => {
+          this.typingOff.add(chatId);
+          this.deps.log("typing_failed", { chatId, error: error.name });
+        });
+      }
       await this.deps.sleep(Math.min(left, TYPING_REFRESH_MS));
     }
   }

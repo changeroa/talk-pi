@@ -94,6 +94,24 @@ describe("typing before a reply", () => {
     expect(events.at(-1)).toBe(`send ${"x".repeat(40)}`);
     expect(events[0]).toBe("typing c1");
   });
+  test("open chats get no typing packet, since it needs a link id the client does not expose", async () => {
+    const { bridge, sockets, events } = setup({ o1: { kind: "open" } });
+    sockets[0].onopen!();
+    await bridge.onKakaoMessage(ev({ chat_id: "o1", log_id: "L9" }));
+    await sockets[0].deliver({ type: "reply", replyTo: "L9", chatId: "o1", text: "응" });
+    await new Promise((r) => setImmediate(r));
+    expect(events.some((e) => e.startsWith("typing"))).toBe(false);
+    expect(events.at(-1)).toBe("send 응");
+  });
+  test("after one failed typing signal that chat gets no more typing packets", async () => {
+    const { sockets, logs } = setup(undefined, false, true);
+    sockets[0].onopen!();
+    await sockets[0].deliver({ type: "reply", replyTo: "R1", chatId: "c1", text: "x".repeat(40) });
+    await new Promise((r) => setImmediate(r));
+    await sockets[0].deliver({ type: "reply", replyTo: "R2", chatId: "c1", text: "x".repeat(40) });
+    await new Promise((r) => setImmediate(r));
+    expect(logs.filter((l) => l.startsWith("typing_failed")).length).toBe(1);
+  });
   test("a failing typing signal still sends the reply", async () => {
     const { sockets, kakao, logs } = setup(undefined, false, true);
     sockets[0].onopen!();
