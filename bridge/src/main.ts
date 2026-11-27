@@ -19,6 +19,16 @@ const listener = new KakaoTalkListener(client);
 const chats = new Map<string, ChatInfo>();
 const linkIds = new Map<string, string | undefined>();
 
+/** Replies queued before a restart arrive before any inbound message, so the chat kind is looked up, never assumed. */
+const chatInfo = async (chatId: string): Promise<ChatInfo> => {
+  const cached = chats.get(chatId);
+  if (cached) return cached;
+  const chat = await client.getChat(chatId);
+  const info: ChatInfo = { kind: classifyKakaoChat(chat), title: chat.title ?? undefined };
+  chats.set(chatId, info);
+  return info;
+};
+
 /**
  * Open chats need the room's link id on the typing packet, and KakaoChat does not expose it,
  * so read it once per room from CHATINFO (`chatInfo.li`, a number or a BSON Long).
@@ -41,17 +51,10 @@ const bridge = new Bridge({
     await client.sendMessage(chatId, text);
   },
   sendTyping: async (chatId) => {
-    const linkId = chats.get(chatId)?.kind === "open" ? await openLinkId(chatId) : undefined;
+    const linkId = (await chatInfo(chatId)).kind === "open" ? await openLinkId(chatId) : undefined;
     await client.sendTyping(chatId, linkId ? { linkId } : undefined);
   },
-  chatInfo: async (chatId) => {
-    const cached = chats.get(chatId);
-    if (cached) return cached;
-    const chat = await client.getChat(chatId);
-    const info: ChatInfo = { kind: classifyKakaoChat(chat), title: chat.title ?? undefined };
-    chats.set(chatId, info);
-    return info;
-  },
+  chatInfo,
   log,
   setTimer: (fn, ms) => setTimeout(fn, ms),
   sleep: (ms) => Bun.sleep(ms),
