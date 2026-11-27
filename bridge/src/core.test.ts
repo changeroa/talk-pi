@@ -120,6 +120,14 @@ describe("typing before a reply", () => {
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
     expect(kakao.map((k) => k.text)).toEqual(["a1", "a2", "b1", "b2"]);
   });
+  test("replies to different chats also go out one at a time", async () => {
+    const { sockets, kakao } = setup({ c1: { kind: "dm" }, c2: { kind: "group" } });
+    sockets[0].onopen!();
+    void sockets[0].deliver({ type: "reply", replyTo: "A", chatId: "c1", text: "a1\na2" });
+    void sockets[0].deliver({ type: "reply", replyTo: "B", chatId: "c2", text: "b1" });
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(kakao.map((k) => `${k.chatId}:${k.text}`)).toEqual(["c1:a1", "c1:a2", "c2:b1"]);
+  });
   test("a failing typing signal sends nothing, and the drop is confirmed", async () => {
     const { sockets, kakao, logs } = setup(undefined, false, true);
     sockets[0].onopen!();

@@ -470,12 +470,19 @@ export class TalkPi extends Agent<Env> {
     try {
       while (queue.length) {
         const batch = queue.splice(0);
-        await this.runTurn(connection, sessionId, batch.at(-1)!.msg, batch.map((b) => b.userText).join("\n"));
+        // Chats also take turns with each other: one Kakao turn runs at a time across all chats.
+        const turnDone = this.kakaoTurns.then(() =>
+          this.runTurn(connection, sessionId, batch.at(-1)!.msg, batch.map((b) => b.userText).join("\n")),
+        );
+        this.kakaoTurns = turnDone.catch(() => {});
+        await turnDone;
       }
     } finally {
       this.chatQueues.delete(msg.chatId);
     }
   }
+
+  private kakaoTurns: Promise<void> = Promise.resolve();
 
   async mailboxPost(text: string): Promise<{ id: number }> {
     const id = enqueue(this.mailSql, text);

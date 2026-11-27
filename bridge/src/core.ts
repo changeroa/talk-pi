@@ -185,19 +185,12 @@ export class Bridge {
     return true;
   }
 
-  /** Replies to one chat go out one after another, never interleaved line by line. */
-  private readonly chatTails = new Map<string, Promise<void>>();
+  /** Replies go out one after another across all chats, never two at once and never interleaved line by line. */
+  private tail: Promise<void> = Promise.resolve();
 
   private inOrder(raw: string): Promise<void> {
-    let chatId = "";
-    try {
-      chatId = String((JSON.parse(raw) as { chatId?: string }).chatId ?? "");
-    } catch {}
-    const next = (this.chatTails.get(chatId) ?? Promise.resolve()).then(() => this.onAgentFrame(raw));
-    this.chatTails.set(chatId, next);
-    void next.finally(() => {
-      if (this.chatTails.get(chatId) === next) this.chatTails.delete(chatId);
-    });
+    const next = this.tail.then(() => this.onAgentFrame(raw));
+    this.tail = next.catch(() => {});
     return next;
   }
 
