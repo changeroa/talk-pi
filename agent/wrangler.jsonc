@@ -13,7 +13,7 @@
   // Deployment- and person-specific values are secrets, set from .deploy.vars (see README):
   // LITELLM_BASE_URL, LITELLM_KEY, BRIDGE_TOKEN, OWNER_KAKAO_IDS, AGENT_NAME, OWNER_HONORIFIC.
   "vars": {
-    "MODEL_ID": "gpt-5.4-mini",
-    "KIBITZER_MODEL_ID": "gpt-5.4-mini"
+    "MODEL_ID": "gpt-6.2-sol",
+    "KIBITZER_MODEL_ID": "gpt-6-luna"
   }
 }
