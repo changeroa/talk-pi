@@ -32,6 +32,8 @@ export interface Env {
   KIBITZER_MODEL_ID: string;
   AGENT_NAME: string;
   OWNER_HONORIFIC: string;
+  /** Optional deployment-specific tone/preference text appended to the persona. */
+  PERSONA_TONE?: string;
 }
 
 const PROVIDER_ID = "litellm";
@@ -208,7 +210,7 @@ export class TalkPi extends Agent<Env> {
     return {
       name: "talk-pi.primary",
       sections: [
-        { key: "persona", render: () => persona({ agentName: this.env.AGENT_NAME, ownerHonorific: this.env.OWNER_HONORIFIC }), tag: false },
+        { key: "persona", render: () => persona({ agentName: this.env.AGENT_NAME, ownerHonorific: this.env.OWNER_HONORIFIC, tone: this.env.PERSONA_TONE }), tag: false },
         {
           key: "speaker",
           render: ({ conversationId }) => {
@@ -386,6 +388,31 @@ export class TalkPi extends Agent<Env> {
         // Test hook: drop all in-memory state; durable SQLite survives.
         this.ctx.abort("restart requested by bridge");
         return;
+      case "import_notes": {
+        const saved: string[] = [];
+        const errors: { path: string; error: string }[] = [];
+        for (const n of frame.notes) {
+          const bad = checkPath(n.path) ?? (n.description.trim() ? undefined : "description is required");
+          if (bad) {
+            errors.push({ path: n.path, error: bad });
+            continue;
+          }
+          this.sql`INSERT OR REPLACE INTO kk_notes (path, description, source, body, updated_at) VALUES (${n.path}, ${n.description}, ${n.source}, ${n.body}, ${Date.now()})`;
+          saved.push(n.path);
+        }
+        log("notes_imported", { saved: saved.length, errors: errors.length });
+        return this.send(connection, { type: "imported", saved, errors });
+      }
+      case "read_notes": {
+        const like = `${frame.prefix.replace(/[%_]/g, "")}%`;
+        const notes = this.sql<Row>`SELECT path, description, source, body FROM kk_notes WHERE path LIKE ${like} ORDER BY path`.map((r) => ({
+          path: String(r.path),
+          description: String(r.description),
+          source: r.source as Provenance,
+          body: String(r.body),
+        }));
+        return this.send(connection, { type: "notes", notes });
+      }
     }
   }
 

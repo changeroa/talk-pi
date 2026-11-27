@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { backoffMs, Bridge, shouldForward, type ChatInfo, type KakaoEvent, type SocketLike } from "./core";
+import { backoffMs, Bridge, normal, REPLY_DELAY, replyDelayMs, shouldForward, splitReply, type ChatInfo, type KakaoEvent, type SocketLike } from "./core";
 
 class FakeSocket implements SocketLike {
   sent: Record<string, unknown>[] = [];
@@ -30,7 +30,12 @@ function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSen
   const kakao: { chatId: string; text: string }[] = [];
   const timers: number[] = [];
   const logs: string[] = [];
+  const sleeps: number[] = [];
   const bridge = new Bridge({
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    random: () => 0.25,
     selfUserId: SELF,
     connect: () => {
       const s = new FakeSocket();
@@ -49,8 +54,25 @@ function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSen
     },
   });
   bridge.start();
-  return { bridge, sockets, kakao, timers, logs };
+  return { bridge, sockets, kakao, timers, logs, sleeps };
 }
+
+describe("reply delay", () => {
+  test("median is read + think + type; grows with both lengths; log-normal jitter; floor and cap", () => {
+    const { readMsPerChar, thinkMs, typeMsPerChar, sigma, minMs, capMs } = REPLY_DELAY;
+    expect(replyDelayMs(10, "응 알았어", 0)).toBe(10 * readMsPerChar + thinkMs + 5 * typeMsPerChar);
+    expect(replyDelayMs(40, "응", 0)).toBeGreaterThan(replyDelayMs(0, "응", 0));
+    expect(replyDelayMs(0, "응 알았어", 1)).toBe(Math.round((thinkMs + 5 * typeMsPerChar) * Math.exp(sigma)));
+    expect(replyDelayMs(0, "", -5)).toBe(minMs);
+    expect(replyDelayMs(0, "x".repeat(5_000), 0)).toBe(capMs);
+    expect(normal(1, 0)).toBeCloseTo(0);
+    expect(normal(Math.exp(-0.5), 0)).toBeCloseTo(1);
+  });
+  test("splits on every line break and drops blank lines", () => {
+    expect(splitReply("한 줄")).toEqual(["한 줄"]);
+    expect(splitReply("한 줄\n두 줄\n\n \n세 줄 ")).toEqual(["한 줄", "두 줄", "세 줄"]);
+  });
+});
 
 describe("shouldForward", () => {
   test("forwards any non-empty message from someone else", () => {
@@ -98,6 +120,54 @@ describe("Bridge", () => {
     await sockets[0].deliver(reply);
     await sockets[0].deliver(reply);
     expect(kakao).toEqual([{ chatId: "c1", text: "응 오빠" }]);
+    expect(sockets[0].sent).toEqual([
+      { type: "delivered", messageId: "A" },
+      { type: "delivered", messageId: "A" },
+    ]);
+  });
+
+  test("waits before each line and confirms delivery only after the last send", async () => {
+    const { bridge, sockets, kakao, sleeps } = setup();
+    sockets[0].onopen!();
+    await bridge.onKakaoMessage(ev({ log_id: "A", message: "오늘 저녁 먹었어?" }));
+    await sockets[0].deliver({ type: "reply", replyTo: "A", chatId: "c1", text: "응\n알았어" });
+    await new Promise((r) => setImmediate(r));
+    const z = normal(0.25, 0.25);
+    expect(sleeps).toEqual([replyDelayMs(10, "응", z), replyDelayMs(0, "알았어", z)]);
+    expect(kakao.map((k) => k.text)).toEqual(["응", "알았어"]);
+    expect(sockets[0].sent.filter((f) => f.type === "delivered")).toEqual([{ type: "delivered", messageId: "A" }]);
+  });
+
+  test("a resend after a mid-reply failure sends only the remaining parts, then confirms", async () => {
+    const sockets: FakeSocket[] = [];
+    const kakao: string[] = [];
+    let failOn = "둘";
+    const bridge = new Bridge({
+      selfUserId: SELF,
+      connect: () => (sockets.push(new FakeSocket()), sockets.at(-1)!),
+      sendKakao: async (_c, text) => {
+        if (text === failOn) throw new Error("boom");
+        kakao.push(text);
+      },
+      chatInfo: async () => ({ kind: "dm" }),
+      log: () => {},
+      setTimer: () => {},
+      sleep: async () => {},
+      random: () => 0.5,
+    });
+    bridge.start();
+    sockets[0].onopen!();
+    const reply = { type: "reply", replyTo: "A", chatId: "c1", text: "하나\n둘\n셋" };
+    await sockets[0].deliver(reply);
+    await new Promise((r) => setImmediate(r));
+    expect(kakao).toEqual(["하나"]);
+    expect(sockets[0].sent).toEqual([]);
+    failOn = "";
+    await sockets[0].deliver(reply);
+    await new Promise((r) => setImmediate(r));
+    await sockets[0].deliver(reply);
+    await new Promise((r) => setImmediate(r));
+    expect(kakao).toEqual(["하나", "둘", "셋"]);
     expect(sockets[0].sent).toEqual([
       { type: "delivered", messageId: "A" },
       { type: "delivered", messageId: "A" },

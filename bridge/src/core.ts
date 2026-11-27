@@ -45,6 +45,29 @@ export interface BridgeDeps {
   selfUserId: string;
   log(event: string, fields: Record<string, string | number | boolean>): void;
   setTimer(fn: () => void, ms: number): unknown;
+  sleep(ms: number): Promise<void>;
+  random(): number;
+}
+
+/** Sources for each constant are in the lane result (reply_delay.research). */
+export const REPLY_DELAY = { readMsPerChar: 85, thinkMs: 1_500, typeMsPerChar: 330, sigma: 0.35, minMs: 1_200, capMs: 45_000 } as const;
+
+/** Standard normal from two uniforms (Box-Muller), so the jitter is log-normal with median 1. */
+export function normal(u1: number, u2: number): number {
+  return Math.sqrt(-2 * Math.log(Math.max(u1, 1e-12))) * Math.cos(2 * Math.PI * u2);
+}
+
+/** Pause before one outgoing message: read the incoming text (first part only), think, type this part. */
+export function replyDelayMs(incomingChars: number, part: string, z: number): number {
+  const { readMsPerChar, thinkMs, typeMsPerChar, sigma, minMs, capMs } = REPLY_DELAY;
+  const ms = (readMsPerChar * incomingChars + thinkMs + typeMsPerChar * [...part].length) * Math.exp(sigma * z);
+  return Math.round(Math.min(capMs, Math.max(minMs, ms)));
+}
+
+/** Each line goes out as its own message, as people send several short ones. */
+export function splitReply(text: string): string[] {
+  const parts = text.split("\n").map((p) => p.trim()).filter(Boolean);
+  return parts.length ? parts : [text];
 }
 
 /** Mechanical only: skip our own messages (loop guard) and empty text. Whether to answer is the agent's call. */
@@ -75,7 +98,10 @@ export class Bridge {
   private stopped = false;
   private readonly pending: Inbound[] = [];
   private readonly inbound = new Deduper();
-  private readonly replies = new Deduper();
+  /** Parts already sent per replyTo, so a resent reply continues where it stopped instead of repeating. */
+  private readonly sentParts = new Map<string, number>();
+  private readonly sending = new Set<string>();
+  private readonly incomingChars = new Map<string, number>();
 
   constructor(private readonly deps: BridgeDeps) {}
 
@@ -103,6 +129,8 @@ export class Bridge {
       text: ev.message,
       ts: ev.sent_at,
     };
+    this.incomingChars.set(ev.log_id, [...ev.message].length);
+    if (this.incomingChars.size > 5_000) this.incomingChars.delete(this.incomingChars.keys().next().value as string);
     this.deps.log("forward", { chatId: ev.chat_id, messageId: ev.log_id, kind: info.kind });
     if (this.open) this.socket!.send(JSON.stringify(frame));
     else this.pending.push(frame);
@@ -141,14 +169,26 @@ export class Bridge {
       return;
     }
     if (frame.type !== "reply") return;
-    if (this.replies.firstTime(frame.replyTo)) {
+    if (this.sending.has(frame.replyTo)) return;
+    const parts = splitReply(frame.text);
+    let done = this.sentParts.get(frame.replyTo) ?? 0;
+    if (done < parts.length) {
+      this.sending.add(frame.replyTo);
       try {
-        await this.deps.sendKakao(frame.chatId, frame.text);
-        this.deps.log("replied", { chatId: frame.chatId, replyTo: frame.replyTo });
+        for (; done < parts.length; done++) {
+          const read = done === 0 ? (this.incomingChars.get(frame.replyTo) ?? 0) : 0;
+          await this.deps.sleep(replyDelayMs(read, parts[done], normal(this.deps.random(), this.deps.random())));
+          await this.deps.sendKakao(frame.chatId, parts[done]);
+          this.sentParts.set(frame.replyTo, done + 1);
+        }
+        this.deps.log("replied", { chatId: frame.chatId, replyTo: frame.replyTo, parts: parts.length });
       } catch (error) {
         this.deps.log("send_failed", { chatId: frame.chatId, replyTo: frame.replyTo, error: (error as Error).name });
         return;
+      } finally {
+        this.sending.delete(frame.replyTo);
       }
+      if (this.sentParts.size > 5_000) this.sentParts.delete(this.sentParts.keys().next().value as string);
     }
     this.socket?.send(JSON.stringify({ type: "delivered", messageId: frame.replyTo }));
   }

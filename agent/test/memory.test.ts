@@ -1,6 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { applyEdit, checkPath, render, search, type Note } from "../src/notes";
 import { checkNudge, recalledMemory, reseedEnvelope, seedEnvelope, wakeEnvelope, type ChatEvent } from "../src/kibitzer";
+import { parseBridgeFrame } from "../src/protocol";
+import { persona } from "../src/persona";
+
+describe("operator frames and persona tone", () => {
+  test("import_notes requires full notes with a known provenance", () => {
+    const ok = { path: "people/1/a.md", description: "d", source: "user", body: "b" };
+    expect(parseBridgeFrame(JSON.stringify({ type: "import_notes", notes: [ok] }))).toEqual({ type: "import_notes", notes: [ok] });
+    expect(parseBridgeFrame(JSON.stringify({ type: "import_notes", notes: [{ ...ok, source: "admin" }] }))).toBeUndefined();
+    expect(parseBridgeFrame(JSON.stringify({ type: "import_notes", notes: [{ path: "x" }] }))).toBeUndefined();
+    expect(parseBridgeFrame(JSON.stringify({ type: "read_notes", prefix: "people/1/" }))).toEqual({ type: "read_notes", prefix: "people/1/" });
+  });
+
+  test("tone is appended only when set", () => {
+    const base = persona({ agentName: "A", ownerHonorific: "O" });
+    expect(persona({ agentName: "A", ownerHonorific: "O", tone: "  " })).toBe(base);
+    expect(persona({ agentName: "A", ownerHonorific: "O", tone: "TONE-X\n" }).endsWith("\nTONE-X")).toBeTrue();
+  });
+});
 
 const note = (path: string, body: string, description = body, updatedAt = 1): Note => ({ path, description, source: "user", body, updatedAt });
 

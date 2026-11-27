@@ -33,6 +33,8 @@ const bridge = new Bridge({
   },
   log,
   setTimer: (fn, ms) => setTimeout(fn, ms),
+  sleep: (ms) => Bun.sleep(ms),
+  random: Math.random,
 });
 
 listener.on("connected", () => log("kakao_connected", {}));

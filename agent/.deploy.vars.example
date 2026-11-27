@@ -1,6 +1,8 @@
 # Copy to .deploy.vars (gitignored) and fill in. scripts/deploy.sh exports CLOUDFLARE_ACCOUNT_ID
 # and uploads every other line as a Worker secret. LITELLM_KEY and BRIDGE_TOKEN are set separately
-# with `wrangler secret put` from stdin so they never sit in this file.
+# with `wrangler secret put` from stdin so they never sit in this file. Optional multi-line PERSONA_TONE
+# (extra tone/owner-preference text appended to the persona) is set the same way: wrangler secret put PERSONA_TONE < tone.txt.
+# Notes can be bulk-imported and read back with: bun scripts/notes.ts import <notes.json> | read <path prefix>.
 CLOUDFLARE_ACCOUNT_ID=<cloudflare account id>
 LITELLM_BASE_URL=https://<litellm host>/v1
 OWNER_KAKAO_IDS=e2e-owner,<owner kakao user id>
