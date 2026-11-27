@@ -107,7 +107,6 @@ export class Bridge {
   private readonly sentParts = new Map<string, number>();
   private readonly sending = new Set<string>();
   private readonly incomingChars = new Map<string, number>();
-  private readonly chatKinds = new Map<string, ChatKind>();
   /** Chats whose typing signal failed once; they get no more typing until restart, so a rejected packet never repeats. */
   private readonly typingOff = new Set<string>();
 
@@ -137,7 +136,6 @@ export class Bridge {
       text: ev.message,
       ts: ev.sent_at,
     };
-    this.chatKinds.set(ev.chat_id, info.kind);
     this.incomingChars.set(ev.log_id, [...ev.message].length);
     if (this.incomingChars.size > 5_000) this.incomingChars.delete(this.incomingChars.keys().next().value as string);
     this.deps.log("forward", { chatId: ev.chat_id, messageId: ev.log_id, kind: info.kind });
@@ -168,12 +166,12 @@ export class Bridge {
 
   /**
    * Waits out the delay while showing "typing", and reports whether typing was shown the whole time.
-   * Nothing is sent without it (owner rule: a message must look typed). Open chats cannot show typing (the packet
-   * needs the room's link id, which the client does not expose), and a chat whose typing failed once stays off
-   * until restart, so a rejected packet is never repeated.
+   * Nothing is sent without it (owner rule: a message must look typed). A chat whose typing failed once stays off
+   * until restart, so a rejected packet is never repeated. Open chats work through patches/agent-messenger, which
+   * fills the room link id the typing packet needs (upstream PR agent-messenger#386).
    */
   private async typeFor(chatId: string, ms: number): Promise<boolean> {
-    if (this.chatKinds.get(chatId) === "open" || this.typingOff.has(chatId)) return false;
+    if (this.typingOff.has(chatId)) return false;
     for (let left = ms; left > 0; left -= TYPING_REFRESH_MS) {
       try {
         await this.deps.sendTyping(chatId);

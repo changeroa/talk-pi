@@ -94,16 +94,14 @@ describe("typing before a reply", () => {
     expect(events.at(-1)).toBe(`send ${"x".repeat(40)}`);
     expect(events[0]).toBe("typing c1");
   });
-  test("open chats cannot show typing, so their replies are dropped and confirmed so the agent stops resending", async () => {
-    const { bridge, sockets, events, kakao, logs } = setup({ o1: { kind: "open" } });
+  test("open chats show typing and get the reply like any other chat", async () => {
+    const { bridge, sockets, events, kakao } = setup({ o1: { kind: "open" } });
     sockets[0].onopen!();
     await bridge.onKakaoMessage(ev({ chat_id: "o1", log_id: "L9" }));
     await sockets[0].deliver({ type: "reply", replyTo: "L9", chatId: "o1", text: "응" });
     await new Promise((r) => setImmediate(r));
-    expect(events.some((e) => e.startsWith("typing"))).toBe(false);
-    expect(kakao).toEqual([]);
-    expect(logs.some((l) => l.startsWith("reply_dropped_no_typing"))).toBe(true);
-    expect(sockets[0].sent.at(-1)).toEqual({ type: "delivered", messageId: "L9" });
+    expect(events[0]).toBe("typing o1");
+    expect(kakao).toEqual([{ chatId: "o1", text: "응" }]);
   });
   test("after one failed typing signal that chat gets no more typing packets", async () => {
     const { sockets, logs } = setup(undefined, false, true);
