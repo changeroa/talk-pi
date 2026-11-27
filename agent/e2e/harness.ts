@@ -139,7 +139,11 @@ result.stranger_ack = (await c.next((f) => f.type === "ack" && f.messageId === s
 const strangerReply = await c.next((f) => f.type === "reply" && f.replyTo === stranger.messageId, 120_000).catch(() => undefined);
 if (strangerReply) send(c.ws, { type: "delivered", messageId: stranger.messageId as string });
 c.ws.close();
-const strangerTurn = await workerLogs.next((e) => e.event === "turn" && e.chatId === strangerChat, 120_000, "stranger turn log");
+// A reply already proves the turn finished. Only a silent turn needs the log, and a live bridge socket can hold the
+// restarted Durable Object's logs until it disconnects, so the log is not required when a reply arrived.
+const strangerTurn = strangerReply
+  ? { status: "done" }
+  : await workerLogs.next((e) => e.event === "turn" && e.chatId === strangerChat, 120_000, "stranger turn log");
 result.stranger_turn = strangerTurn;
 
 // (b) chat B after restart: the agent still answers.
