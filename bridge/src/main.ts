@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { classifyKakaoChat, KakaoTalkClient, KakaoTalkListener } from "agent-messenger/kakaotalk";
+import { Long } from "bson";
 import { Bridge, type ChatInfo, type SocketLike } from "./core";
 
 const required = (name: string) => {
@@ -16,6 +17,22 @@ const log = (event: string, fields: Record<string, string | number | boolean>) =
 const client = await new KakaoTalkClient().login();
 const listener = new KakaoTalkListener(client);
 const chats = new Map<string, ChatInfo>();
+const linkIds = new Map<string, string | undefined>();
+
+/**
+ * Open chats need the room's link id on the typing packet, and KakaoChat does not expose it,
+ * so read it once per room from CHATINFO (`chatInfo.li`, a number or a BSON Long).
+ */
+const openLinkId = async (chatId: string): Promise<string | undefined> => {
+  if (linkIds.has(chatId)) return linkIds.get(chatId);
+  const session = await client.acquireSession();
+  const res = await session.getChannelInfo(Long.fromString(chatId));
+  const li = (res.body as { chatInfo?: { li?: unknown } }).chatInfo?.li;
+  const id = li === undefined || li === null ? undefined : Long.isLong(li) ? li.toString() : typeof li === "number" ? String(li) : undefined;
+  const linkId = id && id !== "0" ? id : undefined;
+  linkIds.set(chatId, linkId);
+  return linkId;
+};
 
 const bridge = new Bridge({
   selfUserId: String(client.getCredentials().userId),
@@ -24,7 +41,8 @@ const bridge = new Bridge({
     await client.sendMessage(chatId, text);
   },
   sendTyping: async (chatId) => {
-    await client.sendTyping(chatId);
+    const linkId = chats.get(chatId)?.kind === "open" ? await openLinkId(chatId) : undefined;
+    await client.sendTyping(chatId, linkId ? { linkId } : undefined);
   },
   chatInfo: async (chatId) => {
     const cached = chats.get(chatId);

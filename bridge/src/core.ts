@@ -167,8 +167,8 @@ export class Bridge {
   /**
    * Waits out the delay while showing "typing", and reports whether typing was shown the whole time.
    * Nothing is sent without it (owner rule: a message must look typed). A chat whose typing failed once stays off
-   * until restart, so a rejected packet is never repeated. Open chats work through patches/agent-messenger, which
-   * fills the room link id the typing packet needs (upstream PR agent-messenger#386).
+   * until restart, so a rejected packet is never repeated. For open chats main.ts passes the room link id the typing
+   * packet needs.
    */
   private async typeFor(chatId: string, ms: number): Promise<boolean> {
     if (this.typingOff.has(chatId)) return false;

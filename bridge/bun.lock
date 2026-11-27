@@ -6,15 +6,13 @@
       "name": "talk-pi-bridge",
       "dependencies": {
         "agent-messenger": "2.43.0",
+        "bson": "^6.10.4",
       },
       "devDependencies": {
         "@types/bun": "^1.4.5",
         "typescript": "^7.0.2",
       },
     },
-  },
-  "patchedDependencies": {
-    "agent-messenger@2.43.0": "patches/agent-messenger@2.43.0.patch",
   },
   "packages": {
     "@borewit/text-codec": ["@borewit/text-codec@0.2.3", "", {}, "sha512-49CycTz1aAZmvFcwkeFyhud1HUmRIB5Tabf7ALV+VA4Iu85MTfz2cUwzPagMFAdVBvrWdkCxG67I30tUwwpKsw=="],

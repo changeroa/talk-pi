@@ -8,13 +8,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "agent-messenger": "2.43.0"
+    "agent-messenger": "2.43.0",
+    "bson": "^6.10.4"
   },
   "devDependencies": {
     "@types/bun": "^1.4.5",
     "typescript": "^7.0.2"
-  },
-  "patchedDependencies": {
-    "agent-messenger@2.43.0": "patches/agent-messenger@2.43.0.patch"
   }
 }
