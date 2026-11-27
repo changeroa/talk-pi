@@ -43,6 +43,8 @@ export interface BridgeDeps {
   sendKakao(chatId: string, text: string): Promise<void>;
   /** Shows "typing" in the chat for a few seconds, as the KakaoTalk app does while a person types. */
   sendTyping(chatId: string): Promise<void>;
+  /** Marks the chat read up to logId, so the "1" disappears before the reply, as when a person opens the chat. */
+  markRead(chatId: string, logId: string): Promise<void>;
   chatInfo(chatId: string): Promise<ChatInfo>;
   selfUserId: string;
   log(event: string, fields: Record<string, string | number | boolean>): void;
@@ -185,6 +187,22 @@ export class Bridge {
     return true;
   }
 
+  /** Chats whose read receipt failed once get no more read packets until restart, and so no replies. */
+  private readonly readOff = new Set<string>();
+
+  /** Nothing is sent before the chat is marked read (owner rule: reply with the "1" already gone). */
+  private async readFirst(chatId: string, logId: string): Promise<boolean> {
+    if (this.readOff.has(chatId)) return false;
+    try {
+      await this.deps.markRead(chatId, logId);
+      return true;
+    } catch (error) {
+      this.readOff.add(chatId);
+      this.deps.log("read_failed", { chatId, error: (error as Error).name });
+      return false;
+    }
+  }
+
   /** Replies go out one after another across all chats, never two at once and never interleaved line by line. */
   private tail: Promise<void> = Promise.resolve();
 
@@ -212,6 +230,11 @@ export class Bridge {
     if (done < parts.length) {
       this.sending.add(frame.replyTo);
       try {
+        if (done === 0 && !(await this.readFirst(frame.chatId, frame.replyTo))) {
+          this.deps.log("reply_dropped_no_read", { chatId: frame.chatId, replyTo: frame.replyTo });
+          this.sentParts.set(frame.replyTo, parts.length);
+          return this.confirm(frame.replyTo);
+        }
         for (; done < parts.length; done++) {
           const read = done === 0 ? (this.incomingChars.get(frame.replyTo) ?? 0) : 0;
           if (!(await this.typeFor(frame.chatId, replyDelayMs(read, parts[done], normal(this.deps.random(), this.deps.random()))))) {
@@ -232,6 +255,10 @@ export class Bridge {
       }
       if (this.sentParts.size > 5_000) this.sentParts.delete(this.sentParts.keys().next().value as string);
     }
-    this.socket?.send(JSON.stringify({ type: "delivered", messageId: frame.replyTo }));
+    this.confirm(frame.replyTo);
+  }
+
+  private confirm(replyTo: string): void {
+    this.socket?.send(JSON.stringify({ type: "delivered", messageId: replyTo }));
   }
 }

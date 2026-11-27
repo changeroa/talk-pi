@@ -65,6 +65,11 @@ const bridge = new Bridge({
   sendKakao: async (chatId, text) => {
     await client.sendMessage(chatId, text);
   },
+  markRead: async (chatId, logId) => {
+    const linkId = (await chatInfo(chatId)).kind === "open" ? await openLinkId(chatId) : undefined;
+    const res = await client.markRead(chatId, logId, linkId ? { linkId } : undefined);
+    if (!res.success) throw new Error(`NOTIREAD status ${res.status_code}`);
+  },
   sendTyping: async (chatId) => {
     const linkId = (await chatInfo(chatId)).kind === "open" ? await openLinkId(chatId) : undefined;
     await client.sendTyping(chatId, linkId ? { linkId } : undefined);

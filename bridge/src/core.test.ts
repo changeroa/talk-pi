@@ -25,7 +25,7 @@ const ev = (over: Partial<KakaoEvent> = {}): KakaoEvent => ({
   chat_id: "c1", log_id: "L1", author_id: 42, author_name: "Owner", message: "안녕", sent_at: 1, ...over,
 });
 
-function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSend = false, failTyping = false) {
+function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSend = false, failTyping = false, failRead = false) {
   const sockets: FakeSocket[] = [];
   const kakao: { chatId: string; text: string }[] = [];
   const timers: number[] = [];
@@ -40,6 +40,10 @@ function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSen
     sendTyping: async (chatId) => {
       if (failTyping) throw new Error("typing down");
       events.push(`typing ${chatId}`);
+    },
+    markRead: async (chatId, logId) => {
+      if (failRead) throw new Error("read down");
+      events.push(`read ${chatId} ${logId}`);
     },
     random: () => 0.25,
     selfUserId: SELF,
@@ -92,7 +96,17 @@ describe("typing before a reply", () => {
     expect(total).toBe(replyDelayMs(0, "x".repeat(40), normal(0.25, 0.25)));
     expect(events.filter((e) => e === "typing c1").length).toBe(Math.ceil(total / TYPING_REFRESH_MS));
     expect(events.at(-1)).toBe(`send ${"x".repeat(40)}`);
-    expect(events[0]).toBe("typing c1");
+    expect(events[0]).toBe("read c1 R");
+    expect(events[1]).toBe("typing c1");
+  });
+  test("if the chat cannot be marked read, nothing is sent and the drop is confirmed", async () => {
+    const { sockets, kakao, events } = setup(undefined, false, false, true);
+    sockets[0].onopen!();
+    await sockets[0].deliver({ type: "reply", replyTo: "R", chatId: "c1", text: "응" });
+    await new Promise((r) => setImmediate(r));
+    expect(kakao).toEqual([]);
+    expect(events.some((e) => e.startsWith("typing"))).toBe(false);
+    expect(sockets[0].sent.at(-1)).toEqual({ type: "delivered", messageId: "R" });
   });
   test("open chats show typing and get the reply like any other chat", async () => {
     const { bridge, sockets, events, kakao } = setup({ o1: { kind: "open" } });
@@ -100,7 +114,7 @@ describe("typing before a reply", () => {
     await bridge.onKakaoMessage(ev({ chat_id: "o1", log_id: "L9" }));
     await sockets[0].deliver({ type: "reply", replyTo: "L9", chatId: "o1", text: "응" });
     await new Promise((r) => setImmediate(r));
-    expect(events[0]).toBe("typing o1");
+    expect(events.slice(0, 2)).toEqual(["read o1 L9", "typing o1"]);
     expect(kakao).toEqual([{ chatId: "o1", text: "응" }]);
   });
   test("after one failed typing signal that chat gets no more typing packets", async () => {
@@ -221,6 +235,7 @@ describe("Bridge", () => {
       setTimer: () => {},
       sleep: async () => {},
       sendTyping: async () => {},
+      markRead: async () => {},
       random: () => 0.5,
     });
     bridge.start();
