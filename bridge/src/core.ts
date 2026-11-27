@@ -167,19 +167,24 @@ export class Bridge {
   }
 
   /**
-   * Waits out the delay while showing "typing". Open chats are skipped: their typing packet needs the room's
-   * link id, which the client does not expose. A failed signal turns typing off for that chat and never blocks the reply.
+   * Waits out the delay while showing "typing", and reports whether typing was shown the whole time.
+   * Nothing is sent without it (owner rule: a message must look typed). Open chats cannot show typing (the packet
+   * needs the room's link id, which the client does not expose), and a chat whose typing failed once stays off
+   * until restart, so a rejected packet is never repeated.
    */
-  private async typeFor(chatId: string, ms: number): Promise<void> {
+  private async typeFor(chatId: string, ms: number): Promise<boolean> {
+    if (this.chatKinds.get(chatId) === "open" || this.typingOff.has(chatId)) return false;
     for (let left = ms; left > 0; left -= TYPING_REFRESH_MS) {
-      if (this.chatKinds.get(chatId) !== "open" && !this.typingOff.has(chatId)) {
-        await this.deps.sendTyping(chatId).catch((error: Error) => {
-          this.typingOff.add(chatId);
-          this.deps.log("typing_failed", { chatId, error: error.name });
-        });
+      try {
+        await this.deps.sendTyping(chatId);
+      } catch (error) {
+        this.typingOff.add(chatId);
+        this.deps.log("typing_failed", { chatId, error: (error as Error).name });
+        return false;
       }
       await this.deps.sleep(Math.min(left, TYPING_REFRESH_MS));
     }
+    return true;
   }
 
   private async onAgentFrame(raw: string): Promise<void> {
@@ -202,11 +207,16 @@ export class Bridge {
       try {
         for (; done < parts.length; done++) {
           const read = done === 0 ? (this.incomingChars.get(frame.replyTo) ?? 0) : 0;
-          await this.typeFor(frame.chatId, replyDelayMs(read, parts[done], normal(this.deps.random(), this.deps.random())));
+          if (!(await this.typeFor(frame.chatId, replyDelayMs(read, parts[done], normal(this.deps.random(), this.deps.random()))))) {
+            // Confirm so the agent stops resending: this reply is dropped, not pending.
+            this.deps.log("reply_dropped_no_typing", { chatId: frame.chatId, replyTo: frame.replyTo, sentParts: done });
+            break;
+          }
           await this.deps.sendKakao(frame.chatId, parts[done]);
           this.sentParts.set(frame.replyTo, done + 1);
         }
-        this.deps.log("replied", { chatId: frame.chatId, replyTo: frame.replyTo, parts: parts.length });
+        if (done === parts.length) this.deps.log("replied", { chatId: frame.chatId, replyTo: frame.replyTo, parts: parts.length });
+        else this.sentParts.set(frame.replyTo, parts.length);
       } catch (error) {
         this.deps.log("send_failed", { chatId: frame.chatId, replyTo: frame.replyTo, error: (error as Error).name });
         return;
