@@ -7,6 +7,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { createRegistry, Harness, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { NO_REPLY, persona } from "./persona";
+import { ChatScheduler } from "./schedule";
 import { parseBridgeFrame, type AgentFrame, type InboundMessage } from "./protocol";
 import { applyEdit, checkPath, PROVENANCE, render, search, type Edit, type Note, type Provenance } from "./notes";
 import {
@@ -458,31 +459,39 @@ export class TalkPi extends Agent<Env> {
     const userText = (msg.chatKind === "dm" ? "" : `[${msg.senderName}] `) + msg.text;
     this.appendEvent(msg.chatId, "prompt", userText);
 
-    // One turn per chat at a time: messages that arrive meanwhile wait and go into the next turn together,
-    // so a chat reads as one conversation instead of several overlapping replies.
-    const waiting = this.chatQueues.get(msg.chatId);
-    if (waiting) {
-      waiting.push({ msg, userText });
-      return;
-    }
-    const queue: { msg: InboundMessage; userText: string }[] = [{ msg, userText }];
-    this.chatQueues.set(msg.chatId, queue);
-    try {
-      while (queue.length) {
-        const batch = queue.splice(0);
-        // Chats also take turns with each other: one Kakao turn runs at a time across all chats.
-        const turnDone = this.kakaoTurns.then(() =>
-          this.runTurn(connection, sessionId, batch.at(-1)!.msg, batch.map((b) => b.userText).join("\n")),
-        );
-        this.kakaoTurns = turnDone.catch(() => {});
-        await turnDone;
-      }
-    } finally {
-      this.chatQueues.delete(msg.chatId);
-    }
+    this.chats.add(msg.chatId, { connection, sessionId, msg, userText });
+    await this.pumpTurns();
   }
 
-  private kakaoTurns: Promise<void> = Promise.resolve();
+  private readonly chats = new ChatScheduler<{ connection: Connection; sessionId: string; msg: InboundMessage; userText: string }>();
+  private pumping = false;
+  private wakeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** One Kakao turn at a time across all chats, chosen by ChatScheduler; a chat's waiting messages form one turn. */
+  private async pumpTurns(): Promise<void> {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      for (let next = this.chats.next(Date.now()); next; next = this.chats.next(Date.now())) {
+        const last = next.items.at(-1)!;
+        try {
+          await this.runTurn(last.connection, last.sessionId, last.msg, next.items.map((i) => i.userText).join("\n"));
+        } catch (err) {
+          log("turn_error", { chatId: next.chatId, error: String(err) });
+        }
+        this.chats.turnDone(next.chatId, Date.now());
+      }
+    } finally {
+      this.pumping = false;
+    }
+    const wake = this.chats.wakeAt(Date.now());
+    if (wake !== undefined && !this.wakeTimer) {
+      this.wakeTimer = setTimeout(() => {
+        this.wakeTimer = undefined;
+        void this.pumpTurns();
+      }, wake - Date.now());
+    }
+  }
 
   async mailboxPost(text: string): Promise<{ id: number }> {
     const id = enqueue(this.mailSql, text);
@@ -528,8 +537,6 @@ export class TalkPi extends Agent<Env> {
       this.draining = false;
     }
   }
-
-  private readonly chatQueues = new Map<string, { msg: InboundMessage; userText: string }[]>();
 
   private async runTurn(connection: Connection, sessionId: string, msg: InboundMessage, userText: string): Promise<void> {
     const turn: Turn = { chatId: msg.chatId, senderId: msg.senderId };
