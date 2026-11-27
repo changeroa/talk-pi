@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { backoffMs, Bridge, normal, REPLY_DELAY, replyDelayMs, shouldForward, splitReply, type ChatInfo, type KakaoEvent, type SocketLike } from "./core";
+import { backoffMs, Bridge, normal, REPLY_DELAY, replyDelayMs, shouldForward, splitReply, TYPING_REFRESH_MS, type ChatInfo, type KakaoEvent, type SocketLike } from "./core";
 
 class FakeSocket implements SocketLike {
   sent: Record<string, unknown>[] = [];
@@ -25,15 +25,21 @@ const ev = (over: Partial<KakaoEvent> = {}): KakaoEvent => ({
   chat_id: "c1", log_id: "L1", author_id: 42, author_name: "Owner", message: "안녕", sent_at: 1, ...over,
 });
 
-function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSend = false) {
+function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSend = false, failTyping = false) {
   const sockets: FakeSocket[] = [];
   const kakao: { chatId: string; text: string }[] = [];
   const timers: number[] = [];
   const logs: string[] = [];
   const sleeps: number[] = [];
+  const events: string[] = [];
   const bridge = new Bridge({
     sleep: async (ms) => {
       sleeps.push(ms);
+      events.push(`sleep ${ms}`);
+    },
+    sendTyping: async (chatId) => {
+      if (failTyping) throw new Error("typing down");
+      events.push(`typing ${chatId}`);
     },
     random: () => 0.25,
     selfUserId: SELF,
@@ -45,6 +51,7 @@ function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSen
     sendKakao: async (chatId, text) => {
       if (failSend) throw new Error("boom");
       kakao.push({ chatId, text });
+      events.push(`send ${text}`);
     },
     chatInfo: async (id) => chats[id] ?? { kind: "unknown" },
     log: (e, fields) => logs.push(`${e} ${JSON.stringify(fields)}`),
@@ -54,7 +61,7 @@ function setup(chats: Record<string, ChatInfo> = { c1: { kind: "dm" } }, failSen
     },
   });
   bridge.start();
-  return { bridge, sockets, kakao, timers, logs, sleeps };
+  return { bridge, sockets, kakao, timers, logs, sleeps, events };
 }
 
 describe("reply delay", () => {
@@ -71,6 +78,29 @@ describe("reply delay", () => {
   test("splits on every line break and drops blank lines", () => {
     expect(splitReply("한 줄")).toEqual(["한 줄"]);
     expect(splitReply("한 줄\n두 줄\n\n \n세 줄 ")).toEqual(["한 줄", "두 줄", "세 줄"]);
+  });
+});
+
+describe("typing before a reply", () => {
+  test("shows typing, renewed every TYPING_REFRESH_MS, for the whole delay before each part", async () => {
+    const { sockets, events, sleeps } = setup();
+    sockets[0].onopen!();
+    await sockets[0].deliver({ type: "reply", replyTo: "R", chatId: "c1", text: "x".repeat(40) });
+    await new Promise((r) => setImmediate(r));
+    const total = sleeps.reduce((a, b) => a + b, 0);
+    expect(sleeps.every((ms) => ms <= TYPING_REFRESH_MS)).toBe(true);
+    expect(total).toBe(replyDelayMs(0, "x".repeat(40), normal(0.25, 0.25)));
+    expect(events.filter((e) => e === "typing c1").length).toBe(Math.ceil(total / TYPING_REFRESH_MS));
+    expect(events.at(-1)).toBe(`send ${"x".repeat(40)}`);
+    expect(events[0]).toBe("typing c1");
+  });
+  test("a failing typing signal still sends the reply", async () => {
+    const { sockets, kakao, logs } = setup(undefined, false, true);
+    sockets[0].onopen!();
+    await sockets[0].deliver({ type: "reply", replyTo: "R", chatId: "c1", text: "응" });
+    await new Promise((r) => setImmediate(r));
+    expect(kakao).toEqual([{ chatId: "c1", text: "응" }]);
+    expect(logs.some((l) => l.startsWith("typing_failed"))).toBe(true);
   });
 });
 
@@ -118,7 +148,9 @@ describe("Bridge", () => {
     sockets[0].onopen!();
     const reply = { type: "reply", replyTo: "A", chatId: "c1", text: "응 오빠" };
     await sockets[0].deliver(reply);
+    await new Promise((r) => setImmediate(r));
     await sockets[0].deliver(reply);
+    await new Promise((r) => setImmediate(r));
     expect(kakao).toEqual([{ chatId: "c1", text: "응 오빠" }]);
     expect(sockets[0].sent).toEqual([
       { type: "delivered", messageId: "A" },
@@ -153,6 +185,7 @@ describe("Bridge", () => {
       log: () => {},
       setTimer: () => {},
       sleep: async () => {},
+      sendTyping: async () => {},
       random: () => 0.5,
     });
     bridge.start();
@@ -178,6 +211,7 @@ describe("Bridge", () => {
     const { sockets, logs } = setup({ c1: { kind: "dm" } }, true);
     sockets[0].onopen!();
     await sockets[0].deliver({ type: "reply", replyTo: "A", chatId: "c1", text: "비밀 내용" });
+    await new Promise((r) => setImmediate(r));
     expect(sockets[0].sent).toEqual([]);
     expect(logs.some((l) => l.startsWith("send_failed"))).toBe(true);
     expect(logs.join("\n")).not.toContain("비밀 내용");

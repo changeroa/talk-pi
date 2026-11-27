@@ -23,6 +23,9 @@ const bridge = new Bridge({
   sendKakao: async (chatId, text) => {
     await client.sendMessage(chatId, text);
   },
+  sendTyping: async (chatId) => {
+    await client.sendTyping(chatId);
+  },
   chatInfo: async (chatId) => {
     const cached = chats.get(chatId);
     if (cached) return cached;

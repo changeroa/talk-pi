@@ -41,6 +41,8 @@ export interface SocketLike {
 export interface BridgeDeps {
   connect(): SocketLike;
   sendKakao(chatId: string, text: string): Promise<void>;
+  /** Shows "typing" in the chat for a few seconds, as the KakaoTalk app does while a person types. */
+  sendTyping(chatId: string): Promise<void>;
   chatInfo(chatId: string): Promise<ChatInfo>;
   selfUserId: string;
   log(event: string, fields: Record<string, string | number | boolean>): void;
@@ -51,6 +53,9 @@ export interface BridgeDeps {
 
 /** Sources for each constant are in the lane result (reply_delay.research). */
 export const REPLY_DELAY = { readMsPerChar: 85, thinkMs: 1_500, typeMsPerChar: 330, sigma: 0.35, minMs: 1_200, capMs: 45_000 } as const;
+
+/** The typing signal fades on the other side, so it is renewed this often while the delay runs. */
+export const TYPING_REFRESH_MS = 4_000;
 
 /** Standard normal from two uniforms (Box-Muller), so the jitter is log-normal with median 1. */
 export function normal(u1: number, u2: number): number {
@@ -157,6 +162,14 @@ export class Bridge {
     };
   }
 
+  /** Waits out the delay while showing "typing"; a failed typing signal only costs the indicator, never the reply. */
+  private async typeFor(chatId: string, ms: number): Promise<void> {
+    for (let left = ms; left > 0; left -= TYPING_REFRESH_MS) {
+      await this.deps.sendTyping(chatId).catch((error: Error) => this.deps.log("typing_failed", { chatId, error: error.name }));
+      await this.deps.sleep(Math.min(left, TYPING_REFRESH_MS));
+    }
+  }
+
   private async onAgentFrame(raw: string): Promise<void> {
     let frame: AgentFrame;
     try {
@@ -177,7 +190,7 @@ export class Bridge {
       try {
         for (; done < parts.length; done++) {
           const read = done === 0 ? (this.incomingChars.get(frame.replyTo) ?? 0) : 0;
-          await this.deps.sleep(replyDelayMs(read, parts[done], normal(this.deps.random(), this.deps.random())));
+          await this.typeFor(frame.chatId, replyDelayMs(read, parts[done], normal(this.deps.random(), this.deps.random())));
           await this.deps.sendKakao(frame.chatId, parts[done]);
           this.sentParts.set(frame.replyTo, done + 1);
         }
