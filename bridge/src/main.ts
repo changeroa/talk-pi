@@ -79,7 +79,11 @@ const bridge = new Bridge({
 listener.on("connected", () => log("kakao_connected", {}));
 listener.on("disconnected", () => log("kakao_disconnected", {}));
 listener.on("error", (err) => log("kakao_error", { name: err.name }));
+/** Optional operator switch: when set, only these chats are forwarded (comma-separated chat ids). */
+const onlyChats = new Set((process.env.ONLY_CHAT_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+
 listener.on("message", (ev) => {
+  if (onlyChats.size && !onlyChats.has(ev.chat_id)) return;
   (async () => {
     const own = String(ev.author_id) === String(client.getCredentials().userId);
     const name = ev.author_name || (own ? "" : await authorName(ev.chat_id, ev.author_id).catch(() => ""));
