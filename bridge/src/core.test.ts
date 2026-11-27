@@ -112,6 +112,14 @@ describe("typing before a reply", () => {
     await new Promise((r) => setImmediate(r));
     expect(logs.filter((l) => l.startsWith("typing_failed")).length).toBe(1);
   });
+  test("two replies to one chat go out one after the other, not interleaved", async () => {
+    const { sockets, kakao } = setup();
+    sockets[0].onopen!();
+    void sockets[0].deliver({ type: "reply", replyTo: "A", chatId: "c1", text: "a1\na2" });
+    void sockets[0].deliver({ type: "reply", replyTo: "B", chatId: "c1", text: "b1\nb2" });
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    expect(kakao.map((k) => k.text)).toEqual(["a1", "a2", "b1", "b2"]);
+  });
   test("a failing typing signal sends nothing, and the drop is confirmed", async () => {
     const { sockets, kakao, logs } = setup(undefined, false, true);
     sockets[0].onopen!();

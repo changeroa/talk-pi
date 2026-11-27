@@ -153,7 +153,7 @@ export class Bridge {
       this.deps.log("agent_connected", {});
       for (const frame of this.pending.splice(0)) socket.send(JSON.stringify(frame));
     };
-    socket.onmessage = (ev) => void this.onAgentFrame(String(ev.data));
+    socket.onmessage = (ev) => void this.inOrder(String(ev.data));
     socket.onerror = () => this.deps.log("agent_error", {});
     socket.onclose = () => {
       this.open = false;
@@ -183,6 +183,22 @@ export class Bridge {
       await this.deps.sleep(Math.min(left, TYPING_REFRESH_MS));
     }
     return true;
+  }
+
+  /** Replies to one chat go out one after another, never interleaved line by line. */
+  private readonly chatTails = new Map<string, Promise<void>>();
+
+  private inOrder(raw: string): Promise<void> {
+    let chatId = "";
+    try {
+      chatId = String((JSON.parse(raw) as { chatId?: string }).chatId ?? "");
+    } catch {}
+    const next = (this.chatTails.get(chatId) ?? Promise.resolve()).then(() => this.onAgentFrame(raw));
+    this.chatTails.set(chatId, next);
+    void next.finally(() => {
+      if (this.chatTails.get(chatId) === next) this.chatTails.delete(chatId);
+    });
+    return next;
   }
 
   private async onAgentFrame(raw: string): Promise<void> {

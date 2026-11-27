@@ -437,11 +437,33 @@ export class TalkPi extends Agent<Env> {
       sessionId = session.id;
       this.sql`INSERT INTO kk_chats (chat_id, session_id, kind, title) VALUES (${msg.chatId}, ${sessionId}, ${msg.chatKind}, ${msg.chatTitle ?? null})`;
     }
-    const turn: Turn = { chatId: msg.chatId, senderId: msg.senderId };
-    this.sql`INSERT OR REPLACE INTO kk_turn (session_id, chat_id, sender_id) VALUES (${sessionId}, ${msg.chatId}, ${msg.senderId})`;
-
     const userText = (msg.chatKind === "dm" ? "" : `[${msg.senderName}] `) + msg.text;
     this.appendEvent(msg.chatId, "prompt", userText);
+
+    // One turn per chat at a time: messages that arrive meanwhile wait and go into the next turn together,
+    // so a chat reads as one conversation instead of several overlapping replies.
+    const waiting = this.chatQueues.get(msg.chatId);
+    if (waiting) {
+      waiting.push({ msg, userText });
+      return;
+    }
+    const queue: { msg: InboundMessage; userText: string }[] = [{ msg, userText }];
+    this.chatQueues.set(msg.chatId, queue);
+    try {
+      while (queue.length) {
+        const batch = queue.splice(0);
+        await this.runTurn(connection, sessionId, batch.at(-1)!.msg, batch.map((b) => b.userText).join("\n"));
+      }
+    } finally {
+      this.chatQueues.delete(msg.chatId);
+    }
+  }
+
+  private readonly chatQueues = new Map<string, { msg: InboundMessage; userText: string }[]>();
+
+  private async runTurn(connection: Connection, sessionId: string, msg: InboundMessage, userText: string): Promise<void> {
+    const turn: Turn = { chatId: msg.chatId, senderId: msg.senderId };
+    this.sql`INSERT OR REPLACE INTO kk_turn (session_id, chat_id, sender_id) VALUES (${sessionId}, ${msg.chatId}, ${msg.senderId})`;
     try {
       await this.wakeKibitzer(turn, msg.messageId);
     } catch (err) {
