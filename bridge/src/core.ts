@@ -103,7 +103,8 @@ export class Bridge {
   private open = false;
   private attempt = 0;
   private stopped = false;
-  private readonly pending: Inbound[] = [];
+  /** Forwarded but not yet acked; resent on reconnect so a message sent into a closing socket is not lost. */
+  private readonly unacked = new Map<string, Inbound>();
   private readonly inbound = new Deduper();
   /** Parts already sent per replyTo, so a resent reply continues where it stopped instead of repeating. */
   private readonly sentParts = new Map<string, number>();
@@ -141,8 +142,8 @@ export class Bridge {
     this.incomingChars.set(ev.log_id, [...ev.message].length);
     if (this.incomingChars.size > 5_000) this.incomingChars.delete(this.incomingChars.keys().next().value as string);
     this.deps.log("forward", { chatId: ev.chat_id, messageId: ev.log_id, kind: info.kind });
+    this.unacked.set(frame.messageId, frame);
     if (this.open) this.socket!.send(JSON.stringify(frame));
-    else this.pending.push(frame);
   }
 
   private dial(): void {
@@ -153,7 +154,7 @@ export class Bridge {
       this.open = true;
       this.attempt = 0;
       this.deps.log("agent_connected", {});
-      for (const frame of this.pending.splice(0)) socket.send(JSON.stringify(frame));
+      for (const frame of this.unacked.values()) socket.send(JSON.stringify(frame));
     };
     socket.onmessage = (ev) => void this.inOrder(String(ev.data));
     socket.onerror = () => this.deps.log("agent_error", {});
@@ -220,6 +221,7 @@ export class Bridge {
       return;
     }
     if (frame.type === "ack") {
+      this.unacked.delete(frame.messageId);
       this.deps.log("ack", { messageId: frame.messageId, status: frame.status });
       return;
     }

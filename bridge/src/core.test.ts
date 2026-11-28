@@ -153,6 +153,22 @@ describe("typing before a reply", () => {
   });
 });
 
+describe("forward delivery", () => {
+  test("a message forwarded into a socket that then closes is resent on reconnect until acked", async () => {
+    const { bridge, sockets } = setup();
+    sockets[0].onopen!();
+    await bridge.onKakaoMessage(ev({ log_id: "L1" }));
+    sockets[0].onclose!();
+    sockets[1].onopen!();
+    expect(sockets[1].sent.map((f) => (f as { messageId: string }).messageId)).toEqual(["L1"]);
+    await sockets[1].deliver({ type: "ack", messageId: "L1", status: "accepted" });
+    await new Promise((r) => setImmediate(r));
+    sockets[1].onclose!();
+    sockets[2].onopen!();
+    expect(sockets[2].sent).toEqual([]);
+  });
+});
+
 describe("shouldForward", () => {
   test("forwards any non-empty message from someone else", () => {
     expect(shouldForward(ev(), SELF)).toBe(true);
